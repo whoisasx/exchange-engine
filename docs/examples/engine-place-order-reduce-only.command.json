@@ -1,0 +1,24 @@
+{
+  "type": "PlaceOrder",
+  "payload": {
+    "input_id": "input_close_001",
+    "envelope": {
+      "request_id": "req_close_001",
+      "idempotency_key": "client-close-001",
+      "user_id": 42,
+      "reply_partition": 0
+    },
+    "reservation_id": "res_close_001",
+    "order_id": 9004,
+    "market_id": 1,
+    "market_name": "SOL-PERP",
+    "side": "SHORT",
+    "order_type": "MARKET",
+    "quantity": 10,
+    "price": 0,
+    "reduce_only": true,
+    "margin_asset": "USDC",
+    "reserved_margin_amount": 0,
+    "leverage": 10
+  }
+}

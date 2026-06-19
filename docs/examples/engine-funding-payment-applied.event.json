@@ -1,0 +1,28 @@
+{
+  "type": "FundingPaymentApplied",
+  "payload": {
+    "engine_event_id": "eng_1_103",
+    "market_id": 1,
+    "engine_sequence": 103,
+    "engine_timestamp_ms": 1710028800000,
+    "source_input_id": "input_funding_settle_001",
+    "source_input_offset": 1241,
+    "funding_interval_id": "funding_SOL-PERP_1710000000_1710028800",
+    "payments": [
+      {
+        "user_id": 42,
+        "position_id": "pos_42_1",
+        "side": "LONG",
+        "asset": "USDC",
+        "amount": -2
+      },
+      {
+        "user_id": 43,
+        "position_id": "pos_43_1",
+        "side": "SHORT",
+        "asset": "USDC",
+        "amount": 2
+      }
+    ]
+  }
+}

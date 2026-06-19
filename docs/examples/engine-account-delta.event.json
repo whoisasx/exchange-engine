@@ -1,0 +1,18 @@
+{
+  "type": "AccountDelta",
+  "payload": {
+    "engine_event_id": "eng_1_110",
+    "market_id": 1,
+    "engine_sequence": 110,
+    "engine_timestamp_ms": 1710000005600,
+    "source_input_id": "input_mark_002",
+    "source_input_offset": 1230,
+    "account_delta_id": "acct_1_19_42",
+    "user_id": 42,
+    "asset": "USDC",
+    "total_delta": -205,
+    "locked_delta": -100,
+    "reason": "LIQUIDATION_SETTLEMENT",
+    "reference_id": "liq_001"
+  }
+}

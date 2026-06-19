@@ -1,0 +1,24 @@
+{
+  "type": "EngineCheckpointCommitted",
+  "payload": {
+    "checkpoint_id": "engine_checkpoint_1710000300",
+    "engine_timestamp_ms": 1710000300000,
+    "schema_version": 1,
+    "engine_build": "cxx-engine-dev",
+    "config_hash": "cfg_001",
+    "engine_input_next_offset": 1301,
+    "uri": "s3://exchange-engine-checkpoints/checkpoint_1710000300.bin.zst",
+    "checksum_sha256": "8843d7f92416211de9ebb963ff4ce28125932878c1f5f96a6b8c7d38f0b4b90f",
+    "byte_size": 1048576,
+    "market_sequences": [
+      {
+        "market_id": 1,
+        "engine_sequence": 114
+      },
+      {
+        "market_id": 2,
+        "engine_sequence": 11
+      }
+    ]
+  }
+}

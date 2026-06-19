@@ -1,0 +1,18 @@
+{
+  "type": "OrderBookDelta",
+  "payload": {
+    "engine_event_id": "eng_1_4",
+    "engine_sequence": 4,
+    "engine_timestamp_ms": 1710000003000,
+    "source_input_id": "input_place_002",
+    "source_input_offset": 1202,
+    "market_id": 1,
+    "bids": [
+      {
+        "price": 100,
+        "quantity": 10
+      }
+    ],
+    "asks": []
+  }
+}

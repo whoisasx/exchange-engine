@@ -1,0 +1,16 @@
+{
+  "type": "MarkPriceUpdated",
+  "payload": {
+    "engine_event_id": "eng_1_101",
+    "market_id": 1,
+    "engine_sequence": 101,
+    "engine_timestamp_ms": 1710000005000,
+    "source_input_id": "input_mark_002",
+    "source_input_offset": 1230,
+    "mark_price": 80,
+    "index_price": 80,
+    "valid_until_ms": 1710000010000,
+    "source_sequence": 45002,
+    "source_status": "VALID"
+  }
+}

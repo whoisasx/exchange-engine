@@ -1,0 +1,10 @@
+{
+  "type": "CancelRejected",
+  "payload": {
+    "request_id": "req_cancel_002",
+    "source_input_id": "input_cancel_002",
+    "source_input_offset": 1211,
+    "order_id": 9002,
+    "reason": "order_not_found"
+  }
+}

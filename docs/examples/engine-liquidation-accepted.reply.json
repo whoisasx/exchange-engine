@@ -1,0 +1,10 @@
+{
+  "type": "LiquidationAccepted",
+  "payload": {
+    "request_id": "req_liq_001",
+    "source_input_id": "input_liq_001",
+    "source_input_offset": 1220,
+    "liquidation_id": "liq_001",
+    "order_id": 9003
+  }
+}

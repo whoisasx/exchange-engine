@@ -1,0 +1,14 @@
+{
+  "type": "CancelOrder",
+  "payload": {
+    "input_id": "input_cancel_001",
+    "envelope": {
+      "request_id": "req_cancel_001",
+      "idempotency_key": "client-cancel-001",
+      "user_id": 42,
+      "reply_partition": 0
+    },
+    "market_id": 1,
+    "order_id": 9001
+  }
+}

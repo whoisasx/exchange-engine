@@ -1,0 +1,20 @@
+{
+  "type": "LiquidationStarted",
+  "payload": {
+    "engine_event_id": "eng_1_107",
+    "market_id": 1,
+    "engine_sequence": 107,
+    "engine_timestamp_ms": 1710000005050,
+    "source_input_id": "input_mark_002",
+    "source_input_offset": 1230,
+    "liquidation_id": "liq_001",
+    "user_id": 42,
+    "position_id": "pos_42_1",
+    "side": "LONG",
+    "quantity": 10,
+    "mark_price": 80,
+    "maintenance_margin": 50,
+    "equity": 25,
+    "reason": "MAINTENANCE_MARGIN_BREACH"
+  }
+}

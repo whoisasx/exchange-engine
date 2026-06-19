@@ -1,0 +1,10 @@
+{
+  "type": "LiquidationRejected",
+  "payload": {
+    "request_id": "req_liq_002",
+    "source_input_id": "input_liq_002",
+    "source_input_offset": 1221,
+    "liquidation_id": "liq_002",
+    "reason": "position is not liquidatable"
+  }
+}

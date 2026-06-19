@@ -1,0 +1,20 @@
+{
+  "type": "LiquidatePosition",
+  "payload": {
+    "input_id": "input_liq_001",
+    "envelope": {
+      "request_id": "req_liq_001",
+      "idempotency_key": "liquidate-001",
+      "user_id": 0,
+      "reply_partition": 0
+    },
+    "liquidation_id": "liq_001",
+    "market_id": 1,
+    "market_name": "SOL-PERP",
+    "liquidated_user_id": 42,
+    "position_side": "LONG",
+    "quantity": 10,
+    "price": 0,
+    "request_source": "KEEPER_HINT"
+  }
+}

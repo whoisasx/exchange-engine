@@ -1,0 +1,15 @@
+{
+  "type": "OrderCancelled",
+  "payload": {
+    "engine_event_id": "eng_1_2",
+    "engine_sequence": 2,
+    "engine_timestamp_ms": 1710000001000,
+    "source_input_id": "input_cancel_001",
+    "source_input_offset": 1210,
+    "order_id": 9001,
+    "reservation_id": "res_place_001",
+    "user_id": 42,
+    "market_id": 1,
+    "released_amount": 1000
+  }
+}

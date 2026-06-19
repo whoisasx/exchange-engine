@@ -1,0 +1,14 @@
+{
+  "type": "OrderOpened",
+  "payload": {
+    "engine_event_id": "eng_1_1",
+    "engine_sequence": 1,
+    "engine_timestamp_ms": 1710000000000,
+    "source_input_id": "input_place_001",
+    "source_input_offset": 1201,
+    "order_id": 9001,
+    "reservation_id": "res_place_001",
+    "user_id": 42,
+    "market_id": 1
+  }
+}

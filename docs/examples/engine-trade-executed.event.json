@@ -1,0 +1,45 @@
+{
+  "type": "TradeExecuted",
+  "payload": {
+    "engine_event_id": "eng_1_3",
+    "engine_sequence": 3,
+    "engine_timestamp_ms": 1710000002000,
+    "source_input_id": "input_place_002",
+    "source_input_offset": 1202,
+    "fill_id": 7001,
+    "market_id": 1,
+    "price": 100,
+    "quantity": 10,
+    "maker_order_id": 9001,
+    "taker_order_id": 9002,
+    "maker_user_id": 42,
+    "taker_user_id": 43,
+    "maker_reservation_id": "res_maker_001",
+    "taker_reservation_id": "res_taker_001",
+    "execution_reason": "TRADE",
+    "fee_deltas": [
+      {
+        "user_id": 43,
+        "asset": "USDC",
+        "amount": 1,
+        "fee_type": "TAKER"
+      }
+    ],
+    "settlements": [
+      {
+        "reservation_id": "res_taker_001",
+        "debit_asset": "USDC",
+        "debit_amount": 1000,
+        "credit_asset": "SOL",
+        "credit_amount": 10
+      },
+      {
+        "reservation_id": "res_maker_001",
+        "debit_asset": "SOL",
+        "debit_amount": 10,
+        "credit_asset": "USDC",
+        "credit_amount": 1000
+      }
+    ]
+  }
+}

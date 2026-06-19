@@ -1,0 +1,16 @@
+{
+  "type": "ReservationReleased",
+  "payload": {
+    "engine_event_id": "eng_1_112",
+    "market_id": 1,
+    "engine_sequence": 112,
+    "engine_timestamp_ms": 1710000007100,
+    "source_input_id": "input_place_003",
+    "source_input_offset": 1251,
+    "reservation_id": "res_place_003",
+    "user_id": 42,
+    "asset": "USDC",
+    "released_amount": 100,
+    "reason": "ORDER_REJECTED_AFTER_RESERVATION"
+  }
+}

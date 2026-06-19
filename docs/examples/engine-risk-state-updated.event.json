@@ -1,0 +1,18 @@
+{
+  "type": "RiskStateUpdated",
+  "payload": {
+    "engine_event_id": "eng_1_105",
+    "market_id": 1,
+    "engine_sequence": 105,
+    "engine_timestamp_ms": 1710000005700,
+    "source_input_id": "input_mark_002",
+    "source_input_offset": 1230,
+    "user_id": 42,
+    "position_id": "pos_42_1",
+    "mark_price": 80,
+    "equity": 0,
+    "maintenance_margin": 0,
+    "margin_ratio": 0,
+    "status": "FLAT"
+  }
+}

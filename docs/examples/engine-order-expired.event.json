@@ -1,0 +1,17 @@
+{
+  "type": "OrderExpired",
+  "payload": {
+    "engine_event_id": "eng_1_111",
+    "market_id": 1,
+    "engine_sequence": 111,
+    "engine_timestamp_ms": 1710000007000,
+    "source_input_id": "input_close_001",
+    "source_input_offset": 1250,
+    "order_id": 9004,
+    "reservation_id": "res_close_001",
+    "user_id": 42,
+    "expired_quantity": 4,
+    "released_amount": 0,
+    "reason": "REDUCE_ONLY_REMAINDER"
+  }
+}

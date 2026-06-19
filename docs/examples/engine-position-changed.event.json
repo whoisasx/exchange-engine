@@ -1,0 +1,23 @@
+{
+  "type": "PositionChanged",
+  "payload": {
+    "engine_event_id": "eng_1_104",
+    "market_id": 1,
+    "engine_sequence": 104,
+    "engine_timestamp_ms": 1710000005300,
+    "source_input_id": "input_mark_002",
+    "source_input_offset": 1230,
+    "user_id": 42,
+    "position_id": "pos_42_1",
+    "side": "LONG",
+    "quantity": 0,
+    "entry_price": 100,
+    "mark_price": 80,
+    "isolated_margin": 0,
+    "realized_pnl": -200,
+    "unrealized_pnl": 0,
+    "maintenance_margin": 0,
+    "liquidation_price": 0,
+    "reason": "LIQUIDATION"
+  }
+}

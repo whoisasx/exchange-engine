@@ -1,0 +1,18 @@
+{
+  "type": "LiquidationCompleted",
+  "payload": {
+    "engine_event_id": "eng_1_109",
+    "market_id": 1,
+    "engine_sequence": 109,
+    "engine_timestamp_ms": 1710000005500,
+    "source_input_id": "input_mark_002",
+    "source_input_offset": 1230,
+    "liquidation_id": "liq_001",
+    "user_id": 42,
+    "position_id": "pos_42_1",
+    "final_status": "FLAT",
+    "remaining_quantity": 0,
+    "insurance_fund_delta": 5,
+    "bad_debt": 0
+  }
+}

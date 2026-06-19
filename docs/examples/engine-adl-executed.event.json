@@ -1,0 +1,20 @@
+{
+  "type": "AdlExecuted",
+  "payload": {
+    "engine_event_id": "eng_1_113",
+    "market_id": 1,
+    "engine_sequence": 113,
+    "engine_timestamp_ms": 1710000007200,
+    "source_input_id": "input_mark_003",
+    "source_input_offset": 1252,
+    "adl_id": "adl_001",
+    "liquidation_id": "liq_002",
+    "liquidated_user_id": 42,
+    "deleveraged_user_id": 44,
+    "position_side": "LONG",
+    "quantity": 5,
+    "price": 75,
+    "rank": 1,
+    "reason": "INSURANCE_FUND_INSUFFICIENT"
+  }
+}

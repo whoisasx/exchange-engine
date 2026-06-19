@@ -1,0 +1,24 @@
+{
+  "type": "PlaceOrder",
+  "payload": {
+    "input_id": "input_place_001",
+    "envelope": {
+      "request_id": "req_place_001",
+      "idempotency_key": "client-order-001",
+      "user_id": 42,
+      "reply_partition": 0
+    },
+    "reservation_id": "res_place_001",
+    "order_id": 9001,
+    "market_id": 1,
+    "market_name": "SOL-PERP",
+    "side": "LONG",
+    "order_type": "LIMIT",
+    "quantity": 10,
+    "price": 100,
+    "reduce_only": false,
+    "margin_asset": "USDC",
+    "reserved_margin_amount": 100,
+    "leverage": 10
+  }
+}

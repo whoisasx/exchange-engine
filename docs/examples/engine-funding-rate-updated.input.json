@@ -1,0 +1,13 @@
+{
+  "type": "FundingRateUpdated",
+  "payload": {
+    "input_id": "input_funding_rate_001",
+    "market_id": 1,
+    "funding_interval_id": "funding_SOL-PERP_1710000000_1710028800",
+    "rate": 25,
+    "rate_scale": 1000000,
+    "interval_start_ms": 1710000000000,
+    "interval_end_ms": 1710028800000,
+    "source_timestamp_ms": 1710000001000
+  }
+}
