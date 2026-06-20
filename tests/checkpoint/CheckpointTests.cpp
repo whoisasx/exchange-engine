@@ -70,6 +70,17 @@ void assert_contains(const std::string& value, const std::string& token) {
   assert(value.find(token) != std::string::npos);
 }
 
+void assert_mark_price_state(const MarkPriceState& state) {
+  assert(state.market_id == 1);
+  assert(state.mark_price == 100);
+  assert(state.index_price == 99);
+  assert(state.source_timestamp_ms == 1'710'000'000'000LL);
+  assert(state.published_at_ms == 1'710'000'000'100LL);
+  assert(state.valid_until_ms == 1'710'000'005'100LL);
+  assert(state.source_sequence == 45'001);
+  assert(state.source_status == "VALID");
+}
+
 std::string place_order_json() {
   return R"json({
   "type": "PlaceOrder",
@@ -114,6 +125,23 @@ std::string cancel_order_json() {
 })json";
 }
 
+std::string mark_price_json() {
+  return R"json({
+  "type": "MarkPriceUpdated",
+  "payload": {
+    "input_id": "input_mark_001",
+    "market_id": 1,
+    "mark_price": 100,
+    "index_price": 99,
+    "source_timestamp_ms": 1710000000000,
+    "published_at_ms": 1710000000100,
+    "valid_until_ms": 1710000005100,
+    "source_sequence": 45001,
+    "source_status": "VALID"
+  }
+})json";
+}
+
 EngineCheckpoint make_checkpoint(std::string checkpoint_id = "checkpoint-1") {
   auto runtime = make_runtime();
   const auto result = runtime.process(make_record(place_order_json(), 1201));
@@ -128,6 +156,25 @@ EngineCheckpoint make_checkpoint(std::string checkpoint_id = "checkpoint-1") {
           .topic = EngineInputTopic,
           .partition = 0,
           .next_offset = 1202,
+      },
+      std::move(checkpoint_id));
+}
+
+EngineCheckpoint make_mark_checkpoint(
+    std::string checkpoint_id = "mark-checkpoint-1") {
+  auto runtime = make_runtime();
+  const auto result = runtime.process(make_record(mark_price_json(), 1301));
+  assert(result.status == EngineProcessStatus::Processed);
+  assert(result.replies.empty());
+  assert(result.events.size() == 1);
+
+  EngineCheckpointManager manager;
+  return manager.create_checkpoint(
+      runtime,
+      CheckpointSourcePosition{
+          .topic = EngineInputTopic,
+          .partition = 0,
+          .next_offset = 1302,
       },
       std::move(checkpoint_id));
 }
@@ -152,6 +199,36 @@ void test_create_checkpoint_captures_recovery_state() {
   assert(checkpoint.metadata_store.find(9001) != nullptr);
   assert(checkpoint.processed_input_ids.contains("input_place_001"));
   assert(checkpoint.processed_idempotency_keys.contains("client-order-001"));
+}
+
+void test_checkpoint_restore_preserves_mark_price_state() {
+  const auto checkpoint = make_mark_checkpoint();
+
+  assert(checkpoint.public_sequences.at(1) == 2);
+  assert(checkpoint.mark_prices.contains(1));
+  assert_mark_price_state(checkpoint.mark_prices.at(1));
+  assert(checkpoint.processed_input_ids.contains("input_mark_001"));
+  assert(checkpoint.processed_input_ids.at("input_mark_001").command_kind ==
+         RuntimeCommandKind::MarkPriceUpdated);
+  assert(checkpoint.processed_input_ids.at("input_mark_001").idempotency_key.empty());
+  assert(checkpoint.processed_idempotency_keys.empty());
+
+  auto restored = make_runtime();
+  EngineCheckpointManager manager;
+  manager.restore_runtime(checkpoint, restored);
+
+  const auto restored_snapshot = restored.snapshot_state();
+  assert(restored_snapshot.public_sequences.at(1) == 2);
+  assert(restored_snapshot.mark_prices.contains(1));
+  assert_mark_price_state(restored_snapshot.mark_prices.at(1));
+
+  const auto duplicate = restored.process_replay(make_record(mark_price_json(), 1301));
+  assert(duplicate.status == EngineProcessStatus::Duplicate);
+  assert(duplicate.empty());
+  assert(duplicate.duplicate.has_value());
+  assert(duplicate.duplicate->reason == EngineDuplicateReason::InputId);
+  assert(duplicate.duplicate->original_offset == 1301);
+  assert(restored.market_sequences().peek(1) == 2);
 }
 
 void test_checkpoint_source_position_validation_is_explicit() {
@@ -289,6 +366,7 @@ void test_restore_runtime_rejects_invalid_source_position() {
 int main() {
   try {
     test_create_checkpoint_captures_recovery_state();
+    test_checkpoint_restore_preserves_mark_price_state();
     test_checkpoint_source_position_validation_is_explicit();
     test_create_checkpoint_rejects_invalid_source_position();
     test_in_memory_store_saves_and_loads_latest();

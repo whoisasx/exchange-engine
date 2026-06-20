@@ -28,6 +28,8 @@ struct EngineCheckpoint {
   EngineSnapshot core_snapshot;
   CheckpointSourcePosition source_position;
   std::unordered_map<cex::adapter::MarketId, EngineSequence> public_sequences;
+  std::unordered_map<cex::adapter::MarketId, cex::runtime::MarkPriceState>
+      mark_prices;
   cex::adapter::OrderMetadataStore metadata_store;
   std::unordered_map<std::string,
                      cex::runtime::EngineRuntimeProcessedRequestSnapshot>

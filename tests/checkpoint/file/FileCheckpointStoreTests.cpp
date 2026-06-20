@@ -93,6 +93,17 @@ const EngineOutputRecord* find_record(
   return nullptr;
 }
 
+void assert_mark_price_state(const MarkPriceState& state) {
+  assert(state.market_id == 1);
+  assert(state.mark_price == 100);
+  assert(state.index_price == 99);
+  assert(state.source_timestamp_ms == 1'710'000'000'000LL);
+  assert(state.published_at_ms == 1'710'000'000'100LL);
+  assert(state.valid_until_ms == 1'710'000'005'100LL);
+  assert(state.source_sequence == 45'001);
+  assert(state.source_status == "VALID");
+}
+
 std::string place_order_json() {
   return R"json({
   "type": "PlaceOrder",
@@ -137,6 +148,23 @@ std::string cancel_order_json() {
 })json";
 }
 
+std::string mark_price_json() {
+  return R"json({
+  "type": "MarkPriceUpdated",
+  "payload": {
+    "input_id": "input_mark_001",
+    "market_id": 1,
+    "mark_price": 100,
+    "index_price": 99,
+    "source_timestamp_ms": 1710000000000,
+    "published_at_ms": 1710000000100,
+    "valid_until_ms": 1710000005100,
+    "source_sequence": 45001,
+    "source_status": "VALID"
+  }
+})json";
+}
+
 EngineCheckpoint make_checkpoint(std::string checkpoint_id) {
   auto runtime = make_runtime();
   const auto result = runtime.process(make_record(place_order_json(), 1201));
@@ -149,6 +177,22 @@ EngineCheckpoint make_checkpoint(std::string checkpoint_id) {
           .topic = EngineInputTopic,
           .partition = 0,
           .next_offset = 1202,
+      },
+      std::move(checkpoint_id));
+}
+
+EngineCheckpoint make_mark_checkpoint(std::string checkpoint_id) {
+  auto runtime = make_runtime();
+  const auto result = runtime.process(make_record(mark_price_json(), 1301));
+  assert(result.status == EngineProcessStatus::Processed);
+
+  EngineCheckpointManager manager;
+  return manager.create_checkpoint(
+      runtime,
+      CheckpointSourcePosition{
+          .topic = EngineInputTopic,
+          .partition = 0,
+          .next_offset = 1302,
       },
       std::move(checkpoint_id));
 }
@@ -215,6 +259,39 @@ void test_file_store_persists_and_restores_resting_order_cancel() {
   assert(restored.metadata_store().empty());
 }
 
+void test_file_store_persists_and_restores_mark_state() {
+  TempDirectory temp;
+  FileCheckpointStore store(temp.path);
+
+  store.save(make_mark_checkpoint("checkpoint-0002"));
+
+  const auto loaded = store.load_latest();
+  assert(loaded.has_value());
+  assert(loaded->checkpoint_id == "checkpoint-0002");
+  assert(loaded->source_position.next_offset == 1302);
+  assert(loaded->public_sequences.at(1) == 2);
+  assert(loaded->mark_prices.contains(1));
+  assert_mark_price_state(loaded->mark_prices.at(1));
+  assert(loaded->processed_input_ids.contains("input_mark_001"));
+  assert(loaded->processed_input_ids.at("input_mark_001").command_kind ==
+         RuntimeCommandKind::MarkPriceUpdated);
+  assert(loaded->processed_idempotency_keys.empty());
+
+  auto restored = make_runtime();
+  EngineCheckpointManager manager;
+  manager.restore_runtime(*loaded, restored);
+
+  const auto snapshot = restored.snapshot_state();
+  assert(snapshot.public_sequences.at(1) == 2);
+  assert(snapshot.mark_prices.contains(1));
+  assert_mark_price_state(snapshot.mark_prices.at(1));
+
+  const auto duplicate = restored.process_replay(make_record(mark_price_json(), 1301));
+  assert(duplicate.status == EngineProcessStatus::Duplicate);
+  assert(duplicate.empty());
+  assert(restored.market_sequences().peek(1) == 2);
+}
+
 }  // namespace
 
 int main() {
@@ -222,6 +299,7 @@ int main() {
     test_file_store_returns_nullopt_when_empty();
     test_file_store_returns_nullopt_for_corrupted_latest_file();
     test_file_store_persists_and_restores_resting_order_cancel();
+    test_file_store_persists_and_restores_mark_state();
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';
     return EXIT_FAILURE;

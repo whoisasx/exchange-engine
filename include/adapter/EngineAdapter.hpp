@@ -87,6 +87,19 @@ struct CancelOrderInput {
   std::optional<BrokerRecordContext> source;
 };
 
+struct MarkPriceUpdatedInput {
+  std::optional<std::string> input_id;
+  MarketId market_id{0};
+  AdapterPrice mark_price{0};
+  AdapterPrice index_price{0};
+  std::int64_t source_timestamp_ms{0};
+  std::int64_t published_at_ms{0};
+  std::int64_t valid_until_ms{0};
+  std::int64_t source_sequence{0};
+  std::string source_status;
+  std::optional<BrokerRecordContext> source;
+};
+
 struct OrderMetadata {
   OrderId order_id{0};
   MarketId market_id{0};

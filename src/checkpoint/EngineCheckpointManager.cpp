@@ -52,6 +52,7 @@ EngineCheckpoint EngineCheckpointManager::create_checkpoint(
       .core_snapshot = std::move(runtime_snapshot.core_snapshot),
       .source_position = std::move(source_position),
       .public_sequences = std::move(runtime_snapshot.public_sequences),
+      .mark_prices = std::move(runtime_snapshot.mark_prices),
       .metadata_store = std::move(runtime_snapshot.metadata_store),
       .processed_input_ids = std::move(runtime_snapshot.processed_input_ids),
       .processed_idempotency_keys =
@@ -71,6 +72,7 @@ void EngineCheckpointManager::restore_runtime(
       .core_snapshot = checkpoint.core_snapshot,
       .metadata_store = checkpoint.metadata_store,
       .public_sequences = checkpoint.public_sequences,
+      .mark_prices = checkpoint.mark_prices,
       .processed_input_ids = checkpoint.processed_input_ids,
       .processed_idempotency_keys = checkpoint.processed_idempotency_keys,
   });

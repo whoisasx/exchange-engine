@@ -21,10 +21,22 @@ struct EngineRuntimeProcessedRequestSnapshot {
   std::string idempotency_key;
 };
 
+struct MarkPriceState {
+  cex::adapter::MarketId market_id{0};
+  cex::adapter::AdapterPrice mark_price{0};
+  cex::adapter::AdapterPrice index_price{0};
+  std::int64_t source_timestamp_ms{0};
+  std::int64_t published_at_ms{0};
+  std::int64_t valid_until_ms{0};
+  std::int64_t source_sequence{0};
+  std::string source_status;
+};
+
 struct EngineRuntimeStateSnapshot {
   EngineSnapshot core_snapshot;
   cex::adapter::OrderMetadataStore metadata_store;
   std::unordered_map<cex::adapter::MarketId, EngineSequence> public_sequences;
+  std::unordered_map<cex::adapter::MarketId, MarkPriceState> mark_prices;
   std::unordered_map<std::string, EngineRuntimeProcessedRequestSnapshot>
       processed_input_ids;
   std::unordered_map<std::string, EngineRuntimeProcessedRequestSnapshot>
@@ -48,6 +60,9 @@ class EngineRuntime {
       const noexcept;
   [[nodiscard]] const cex::adapter::MarketSequenceGenerator& market_sequences()
       const noexcept;
+  [[nodiscard]] const std::unordered_map<cex::adapter::MarketId,
+                                         MarkPriceState>&
+  mark_prices() const noexcept;
   [[nodiscard]] EngineRuntimeStateSnapshot snapshot_state() const;
   void restore_state(const EngineRuntimeStateSnapshot& snapshot);
 
@@ -64,6 +79,9 @@ class EngineRuntime {
   [[nodiscard]] std::optional<EngineProcessResult> duplicate_result_for(
       const std::optional<std::string>& input_id,
       const std::string& idempotency_key) const;
+  [[nodiscard]] std::optional<EngineProcessResult>
+  duplicate_input_result_for(
+      const std::optional<std::string>& input_id) const;
   [[nodiscard]] EngineProcessResult make_duplicate_result(
       EngineDuplicateReason reason,
       const std::string& key,
@@ -72,6 +90,9 @@ class EngineRuntime {
                       const InboundEngineRecord& record,
                       const std::optional<std::string>& input_id,
                       const std::string& idempotency_key);
+  void mark_input_processed(RuntimeCommandKind command_kind,
+                            const InboundEngineRecord& record,
+                            const std::optional<std::string>& input_id);
 
   [[nodiscard]] EngineEventTranslationContext make_translation_context(
       const InboundEngineRecord& record,
@@ -88,6 +109,7 @@ class EngineRuntime {
   EngineRuntimeClock clock_;
   EngineInputParser parser_;
   EngineEventTranslator translator_;
+  std::unordered_map<cex::adapter::MarketId, MarkPriceState> mark_prices_;
   std::unordered_map<std::string, ProcessedRuntimeRequest>
       processed_input_ids_;
   std::unordered_map<std::string, ProcessedRuntimeRequest>

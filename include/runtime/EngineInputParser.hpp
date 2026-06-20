@@ -13,11 +13,13 @@ namespace cex::runtime {
 enum class ParsedEngineInputKind {
   PlaceOrder,
   CancelOrder,
+  MarkPriceUpdated,
 };
 
 using ParsedEngineInputValue =
     std::variant<cex::adapter::PlaceOrderInput,
-                 cex::adapter::CancelOrderInput>;
+                 cex::adapter::CancelOrderInput,
+                 cex::adapter::MarkPriceUpdatedInput>;
 
 struct ParsedEngineInput {
   ParsedEngineInputKind kind{ParsedEngineInputKind::PlaceOrder};
@@ -36,6 +38,8 @@ class EngineInputParser {
   [[nodiscard]] cex::adapter::PlaceOrderInput parse_place_order(
       const protocol::ProtocolMessage& message) const;
   [[nodiscard]] cex::adapter::CancelOrderInput parse_cancel_order(
+      const protocol::ProtocolMessage& message) const;
+  [[nodiscard]] cex::adapter::MarkPriceUpdatedInput parse_mark_price_updated(
       const protocol::ProtocolMessage& message) const;
 };
 

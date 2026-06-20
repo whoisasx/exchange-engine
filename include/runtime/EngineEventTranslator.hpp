@@ -13,6 +13,7 @@ namespace cex::runtime {
 enum class RuntimeCommandKind {
   PlaceOrder,
   CancelOrder,
+  MarkPriceUpdated,
 };
 
 struct EngineEventTranslationContext {

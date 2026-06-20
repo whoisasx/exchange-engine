@@ -3,6 +3,7 @@
 #include <chrono>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <variant>
 
@@ -75,6 +76,56 @@ void cleanup_completed_order_metadata(
           input.time_in_force == cex::adapter::AdapterTimeInForce::PostOnly);
 }
 
+template <typename Value>
+[[nodiscard]] std::string text(Value value) {
+  return std::to_string(value);
+}
+
+[[nodiscard]] MarkPriceState mark_state_from_input(
+    const cex::adapter::MarkPriceUpdatedInput& input) {
+  return MarkPriceState{
+      .market_id = input.market_id,
+      .mark_price = input.mark_price,
+      .index_price = input.index_price,
+      .source_timestamp_ms = input.source_timestamp_ms,
+      .published_at_ms = input.published_at_ms,
+      .valid_until_ms = input.valid_until_ms,
+      .source_sequence = input.source_sequence,
+      .source_status = input.source_status,
+  };
+}
+
+[[nodiscard]] EngineOutputRecord make_mark_price_updated_event(
+    const InboundEngineRecord& record,
+    const cex::adapter::MarkPriceUpdatedInput& input,
+    cex::adapter::MarketSequenceGenerator& market_sequences,
+    const EngineRuntimeClock& clock) {
+  const EngineSequence sequence = market_sequences.next(input.market_id);
+  PayloadFields payload{
+      {"engine_sequence", text(sequence)},
+      {"engine_event_id", "eng_" + text(input.market_id) + "_" + text(sequence)},
+      {"engine_timestamp_ms", text(clock ? clock() : 0)},
+      {"source_input_offset", text(record.offset)},
+      {"market_id", text(input.market_id)},
+      {"mark_price", text(input.mark_price)},
+      {"index_price", text(input.index_price)},
+      {"valid_until_ms", text(input.valid_until_ms)},
+      {"source_sequence", text(input.source_sequence)},
+      {"source_status", input.source_status},
+  };
+  if (input.input_id.has_value()) {
+    payload.emplace("source_input_id", *input.input_id);
+  }
+
+  return EngineOutputRecord{
+      .topic = EngineEventsTopic,
+      .type = "MarkPriceUpdated",
+      .key = text(input.market_id),
+      .partition = std::nullopt,
+      .payload = std::move(payload),
+  };
+}
+
 EngineProcessResult apply_processing_mode(EngineProcessResult result,
                                           ProcessingMode mode) {
   if (mode == ProcessingMode::ReplaySilent) {
@@ -121,6 +172,20 @@ std::optional<EngineProcessResult> EngineRuntime::duplicate_result_for(
   return std::nullopt;
 }
 
+std::optional<EngineProcessResult> EngineRuntime::duplicate_input_result_for(
+    const std::optional<std::string>& input_id) const {
+  if (!input_id.has_value()) {
+    return std::nullopt;
+  }
+
+  const auto input_it = processed_input_ids_.find(*input_id);
+  if (input_it == processed_input_ids_.end()) {
+    return std::nullopt;
+  }
+  return make_duplicate_result(
+      EngineDuplicateReason::InputId, *input_id, input_it->second);
+}
+
 EngineProcessResult EngineRuntime::make_duplicate_result(
     EngineDuplicateReason reason,
     const std::string& key,
@@ -158,6 +223,26 @@ void EngineRuntime::mark_processed(
   }
   (void)processed_idempotency_keys_.emplace(idempotency_key,
                                             std::move(processed));
+}
+
+void EngineRuntime::mark_input_processed(
+    RuntimeCommandKind command_kind,
+    const InboundEngineRecord& record,
+    const std::optional<std::string>& input_id) {
+  if (!input_id.has_value()) {
+    return;
+  }
+
+  ProcessedRuntimeRequest processed{
+      .command_kind = command_kind,
+      .topic = record.topic,
+      .partition = record.partition,
+      .offset = record.offset,
+      .input_id = input_id,
+      .idempotency_key = "",
+  };
+
+  (void)processed_input_ids_.emplace(*input_id, std::move(processed));
 }
 
 EngineProcessResult EngineRuntime::process(const InboundEngineRecord& record,
@@ -199,6 +284,26 @@ EngineProcessResult EngineRuntime::process(const InboundEngineRecord& record,
                    record,
                    input.input_id,
                    input.envelope.idempotency_key);
+    return apply_processing_mode(std::move(result), mode);
+  }
+
+  if (parsed.kind == ParsedEngineInputKind::MarkPriceUpdated) {
+    auto input = std::get<cex::adapter::MarkPriceUpdatedInput>(parsed.value);
+    if (auto duplicate = duplicate_input_result_for(input.input_id);
+        duplicate.has_value()) {
+      return *duplicate;
+    }
+
+    input.source = broker_context(record);
+
+    auto state = mark_state_from_input(input);
+    EngineProcessResult result;
+    result.events.push_back(make_mark_price_updated_event(
+        record, input, market_sequences_, clock_));
+    mark_prices_[input.market_id] = std::move(state);
+    mark_input_processed(RuntimeCommandKind::MarkPriceUpdated,
+                         record,
+                         input.input_id);
     return apply_processing_mode(std::move(result), mode);
   }
 
@@ -246,11 +351,17 @@ const cex::adapter::MarketSequenceGenerator& EngineRuntime::market_sequences()
   return market_sequences_;
 }
 
+const std::unordered_map<cex::adapter::MarketId, MarkPriceState>&
+EngineRuntime::mark_prices() const noexcept {
+  return mark_prices_;
+}
+
 EngineRuntimeStateSnapshot EngineRuntime::snapshot_state() const {
   EngineRuntimeStateSnapshot snapshot{
       .core_snapshot = core_.snapshot(),
       .metadata_store = metadata_store_,
       .public_sequences = market_sequences_.snapshot(),
+      .mark_prices = mark_prices_,
   };
 
   for (const auto& [key, processed] : processed_input_ids_) {
@@ -292,6 +403,8 @@ void EngineRuntime::restore_state(
   for (const auto& [market_id, next_sequence] : snapshot.public_sequences) {
     market_sequences_.restore(market_id, next_sequence);
   }
+
+  mark_prices_ = snapshot.mark_prices;
 
   processed_input_ids_.clear();
   for (const auto& [key, processed] : snapshot.processed_input_ids) {

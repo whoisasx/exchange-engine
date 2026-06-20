@@ -232,6 +232,8 @@ template <typename Enum>
       return cex::runtime::RuntimeCommandKind::PlaceOrder;
     case static_cast<int>(cex::runtime::RuntimeCommandKind::CancelOrder):
       return cex::runtime::RuntimeCommandKind::CancelOrder;
+    case static_cast<int>(cex::runtime::RuntimeCommandKind::MarkPriceUpdated):
+      return cex::runtime::RuntimeCommandKind::MarkPriceUpdated;
     default:
       throw CheckpointParseError("invalid runtime command kind");
   }
@@ -353,6 +355,26 @@ sorted_public_sequences(
     sorted.emplace_back(market_id, next_sequence);
   }
   std::sort(sorted.begin(), sorted.end());
+  return sorted;
+}
+
+[[nodiscard]] std::vector<
+    std::pair<cex::adapter::MarketId, cex::runtime::MarkPriceState>>
+sorted_mark_prices(
+    const std::unordered_map<cex::adapter::MarketId,
+                             cex::runtime::MarkPriceState>& entries) {
+  std::vector<
+      std::pair<cex::adapter::MarketId, cex::runtime::MarkPriceState>>
+      sorted;
+  sorted.reserve(entries.size());
+  for (const auto& [market_id, state] : entries) {
+    sorted.emplace_back(market_id, state);
+  }
+  std::sort(sorted.begin(),
+            sorted.end(),
+            [](const auto& left, const auto& right) {
+              return left.first < right.first;
+            });
   return sorted;
 }
 
@@ -571,6 +593,27 @@ void write_processed_requests(
   }
 }
 
+void write_mark_prices(
+    std::ostream& out,
+    const std::unordered_map<cex::adapter::MarketId,
+                             cex::runtime::MarkPriceState>& entries) {
+  const auto sorted = sorted_mark_prices(entries);
+  write_line(out, {"mark_prices", std::to_string(sorted.size())});
+
+  for (const auto& [market_id, state] : sorted) {
+    write_line(out,
+               {"mark_price_state",
+                std::to_string(market_id),
+                std::to_string(state.mark_price),
+                std::to_string(state.index_price),
+                std::to_string(state.source_timestamp_ms),
+                std::to_string(state.published_at_ms),
+                std::to_string(state.valid_until_ms),
+                std::to_string(state.source_sequence),
+                escape_field(state.source_status)});
+  }
+}
+
 void write_checkpoint(std::ostream& out, const EngineCheckpoint& checkpoint) {
   out << kMagic << '\n';
 
@@ -608,6 +651,7 @@ void write_checkpoint(std::ostream& out, const EngineCheckpoint& checkpoint) {
                 std::to_string(next_sequence)});
   }
 
+  write_mark_prices(out, checkpoint.mark_prices);
   write_metadata_store(out, checkpoint);
   write_processed_requests(
       out, "processed_input_ids", checkpoint.processed_input_ids);
@@ -665,7 +709,20 @@ class CheckpointReader {
     checkpoint.core_snapshot.symbolSnapshots = read_symbols();
     checkpoint.core_snapshot.idempotencyState = read_idempotency_snapshot();
     checkpoint.public_sequences = read_public_sequences();
-    checkpoint.metadata_store = read_metadata_store();
+
+    const auto after_public_sequences = read_fields_any();
+    if (!after_public_sequences.empty() &&
+        after_public_sequences.front() == "mark_prices") {
+      checkpoint.mark_prices = read_mark_prices(after_public_sequences);
+      checkpoint.metadata_store = read_metadata_store();
+    } else if (!after_public_sequences.empty() &&
+               after_public_sequences.front() == "metadata") {
+      checkpoint.metadata_store =
+          read_metadata_store(after_public_sequences);
+    } else {
+      throw CheckpointParseError("unexpected checkpoint section");
+    }
+
     checkpoint.processed_input_ids =
         read_processed_requests("processed_input_ids");
     checkpoint.processed_idempotency_keys =
@@ -691,17 +748,29 @@ class CheckpointReader {
 
   [[nodiscard]] std::vector<std::string> read_fields(
       std::string_view expected_tag) {
-    auto fields = split_line(read_raw_line());
+    auto fields = read_fields_any();
     if (fields.empty() || fields.front() != expected_tag) {
       throw CheckpointParseError("unexpected checkpoint section");
     }
     return fields;
   }
 
-  [[nodiscard]] std::size_t read_count(std::string_view expected_tag) {
-    const auto fields = read_fields(expected_tag);
+  [[nodiscard]] std::vector<std::string> read_fields_any() {
+    return split_line(read_raw_line());
+  }
+
+  [[nodiscard]] std::size_t count_from_fields(
+      const std::vector<std::string>& fields,
+      std::string_view expected_tag) {
+    if (fields.empty() || fields.front() != expected_tag) {
+      throw CheckpointParseError("unexpected checkpoint section");
+    }
     require_field_count(fields, 2);
     return parse_integer<std::size_t>(fields[1]);
+  }
+
+  [[nodiscard]] std::size_t read_count(std::string_view expected_tag) {
+    return count_from_fields(read_fields(expected_tag), expected_tag);
   }
 
   [[nodiscard]] SymbolConfig read_symbol_config() {
@@ -922,8 +991,46 @@ class CheckpointReader {
     return sequences;
   }
 
+  [[nodiscard]] std::unordered_map<cex::adapter::MarketId,
+                                   cex::runtime::MarkPriceState>
+  read_mark_prices(const std::vector<std::string>& count_fields) {
+    const std::size_t count = count_from_fields(count_fields, "mark_prices");
+    std::unordered_map<cex::adapter::MarketId,
+                       cex::runtime::MarkPriceState>
+        mark_prices;
+    mark_prices.reserve(count);
+
+    for (std::size_t index = 0; index < count; ++index) {
+      const auto fields = read_fields("mark_price_state");
+      require_field_count(fields, 9);
+
+      cex::runtime::MarkPriceState state{
+          .market_id = parse_integer<cex::adapter::MarketId>(fields[1]),
+          .mark_price = parse_integer<cex::adapter::AdapterPrice>(fields[2]),
+          .index_price = parse_integer<cex::adapter::AdapterPrice>(fields[3]),
+          .source_timestamp_ms =
+              parse_integer<std::int64_t>(fields[4]),
+          .published_at_ms = parse_integer<std::int64_t>(fields[5]),
+          .valid_until_ms = parse_integer<std::int64_t>(fields[6]),
+          .source_sequence = parse_integer<std::int64_t>(fields[7]),
+          .source_status = unescape_field(fields[8]),
+      };
+
+      if (!mark_prices.emplace(state.market_id, std::move(state)).second) {
+        throw CheckpointParseError("duplicate mark price market id");
+      }
+    }
+
+    return mark_prices;
+  }
+
   [[nodiscard]] cex::adapter::OrderMetadataStore read_metadata_store() {
-    const std::size_t count = read_count("metadata");
+    return read_metadata_store(read_fields("metadata"));
+  }
+
+  [[nodiscard]] cex::adapter::OrderMetadataStore read_metadata_store(
+      const std::vector<std::string>& count_fields) {
+    const std::size_t count = count_from_fields(count_fields, "metadata");
     cex::adapter::OrderMetadataStore store;
 
     for (std::size_t index = 0; index < count; ++index) {

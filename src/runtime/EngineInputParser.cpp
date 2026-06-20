@@ -221,6 +221,12 @@ ParsedEngineInput EngineInputParser::parse(std::string_view raw_json) const {
         .value = parse_cancel_order(message),
     };
   }
+  if (message.type == "MarkPriceUpdated") {
+    return ParsedEngineInput{
+        .kind = ParsedEngineInputKind::MarkPriceUpdated,
+        .value = parse_mark_price_updated(message),
+    };
+  }
 
   throw parser_error("unsupported engine input type '" + message.type + "'");
 }
@@ -266,6 +272,29 @@ cex::adapter::CancelOrderInput EngineInputParser::parse_cancel_order(
       .envelope = require_envelope(payload),
       .market_id = require_i64(payload, "market_id", "payload"),
       .order_id = require_i64(payload, "order_id", "payload"),
+      .source = std::nullopt,
+  };
+}
+
+cex::adapter::MarkPriceUpdatedInput
+EngineInputParser::parse_mark_price_updated(
+    const protocol::ProtocolMessage& message) const {
+  if (message.type != "MarkPriceUpdated") {
+    throw parser_error("expected MarkPriceUpdated message");
+  }
+
+  const auto& payload = message.payload;
+  return cex::adapter::MarkPriceUpdatedInput{
+      .input_id = optional_payload_string(message, "input_id"),
+      .market_id = require_i64(payload, "market_id", "payload"),
+      .mark_price = require_i64(payload, "mark_price", "payload"),
+      .index_price = require_i64(payload, "index_price", "payload"),
+      .source_timestamp_ms =
+          require_i64(payload, "source_timestamp_ms", "payload"),
+      .published_at_ms = require_i64(payload, "published_at_ms", "payload"),
+      .valid_until_ms = require_i64(payload, "valid_until_ms", "payload"),
+      .source_sequence = require_i64(payload, "source_sequence", "payload"),
+      .source_status = require_payload_string(message, "source_status"),
       .source = std::nullopt,
   };
 }
