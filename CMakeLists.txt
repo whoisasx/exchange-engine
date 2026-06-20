@@ -142,6 +142,24 @@ target_link_libraries(engine_broker
     cex::engine_runtime
 )
 
+add_library(engine_app_config
+  src/apps/engine/EngineAppConfig.cpp
+)
+add_library(cex::engine_app_config ALIAS engine_app_config)
+
+target_compile_features(engine_app_config PUBLIC cxx_std_20)
+
+target_include_directories(engine_app_config
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+
+target_link_libraries(engine_app_config
+  PUBLIC
+    cex::engine_runtime
+)
+
 set(ENGINE_RDKAFKA_ROOT_HINTS)
 if(DEFINED ENV{HOMEBREW_PREFIX})
   list(APPEND ENGINE_RDKAFKA_ROOT_HINTS "$ENV{HOMEBREW_PREFIX}/opt/librdkafka")
@@ -220,6 +238,21 @@ elseif(NOT ENGINE_RDKAFKA_FOUND)
   message(STATUS "librdkafka++ not found; skipping engine_broker_rdkafka target/tests")
 else()
   message(STATUS "ENGINE_ENABLE_RDKAFKA is OFF; skipping engine_broker_rdkafka target/tests")
+endif()
+
+if(TARGET cex::engine_broker_rdkafka)
+  add_executable(engine_app
+    apps/engine/main.cpp
+  )
+
+  target_link_libraries(engine_app
+    PRIVATE
+      cex::engine_app_config
+      cex::engine_checkpoint
+      cex::engine_broker_rdkafka
+  )
+else()
+  message(STATUS "engine_app requires engine_broker_rdkafka; skipping executable")
 endif()
 
 include(CTest)
@@ -321,6 +354,17 @@ if(BUILD_TESTING)
 
     add_test(NAME rdkafka_broker_tests COMMAND rdkafka_broker_tests)
   endif()
+
+  add_executable(engine_app_config_tests
+    tests/apps/engine/EngineAppConfigTests.cpp
+  )
+
+  target_link_libraries(engine_app_config_tests
+    PRIVATE
+      cex::engine_app_config
+  )
+
+  add_test(NAME engine_app_config_tests COMMAND engine_app_config_tests)
 
   add_executable(service_contract_tests
     tests/services/ServiceContractsTest.cpp
