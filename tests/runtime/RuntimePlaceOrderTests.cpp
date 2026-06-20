@@ -1,4 +1,7 @@
 #include "runtime/EngineRuntime.hpp"
+#include "runtime/EngineOutbox.hpp"
+#include "runtime/EngineOutputSerializer.hpp"
+#include "protocol/Message.hpp"
 
 #include <cassert>
 #include <cstdlib>
@@ -8,6 +11,8 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #ifndef PROTOCOL_EXAMPLES_DIR
@@ -17,6 +22,33 @@
 using namespace cex::runtime;
 
 namespace {
+
+class CapturingPublisher final : public IEnginePublisher {
+ public:
+  struct PublishedRecord {
+    EngineOutputRecord record;
+    std::string serialized_json;
+  };
+
+  std::optional<std::string> publish(
+      const EngineOutputRecord& record,
+      std::string_view serialized_json) override {
+    records.push_back(PublishedRecord{
+        .record = record,
+        .serialized_json = std::string(serialized_json),
+    });
+
+    if (next_error.has_value()) {
+      std::optional<std::string> error = std::move(next_error);
+      next_error.reset();
+      return error;
+    }
+    return std::nullopt;
+  }
+
+  std::vector<PublishedRecord> records;
+  std::optional<std::string> next_error;
+};
 
 std::string read_file(const std::filesystem::path& path) {
   std::ifstream input(path);
@@ -78,6 +110,141 @@ const EngineOutputRecord* find_record(
     }
   }
   return nullptr;
+}
+
+protocol::ProtocolMessage parse_serialized_output_json(
+    const EngineOutputRecord& record,
+    const std::string& serialized) {
+  const protocol::JsonValue root = protocol::parse_json(serialized);
+  const auto* root_object = root.as_object();
+  assert(root_object != nullptr);
+  assert(root_object->size() == 2);
+
+  const auto* type = root.find("type");
+  assert(type != nullptr);
+  assert(type->as_string() != nullptr);
+  assert(*type->as_string() == record.type);
+
+  const auto* payload = root.find("payload");
+  assert(payload != nullptr);
+  assert(payload->as_object() != nullptr);
+
+  protocol::ProtocolMessage message =
+      protocol::parse_protocol_message(serialized);
+  assert(message.type == record.type);
+  assert(message.payload.is_object());
+  return message;
+}
+
+protocol::ProtocolMessage parse_serialized_output(
+    const EngineOutputRecord& record) {
+  return parse_serialized_output_json(record,
+                                      serialize_engine_output_record(record));
+}
+
+const protocol::JsonValue& payload_field(
+    const protocol::ProtocolMessage& message,
+    const std::string& field) {
+  const auto* value = message.payload.find(field);
+  assert(value != nullptr);
+  return *value;
+}
+
+void assert_payload_string(const protocol::ProtocolMessage& message,
+                           const std::string& field,
+                           const std::string& expected) {
+  const auto* value = payload_field(message, field).as_string();
+  assert(value != nullptr);
+  assert(*value == expected);
+}
+
+void assert_payload_number(const protocol::ProtocolMessage& message,
+                           const std::string& field,
+                           const std::string& expected) {
+  const auto* value = payload_field(message, field).as_number();
+  assert(value != nullptr);
+  assert(value->text == expected);
+}
+
+void assert_duplicate_result(const EngineProcessResult& result,
+                             EngineDuplicateReason reason,
+                             const std::string& key,
+                             std::int64_t original_offset,
+                             const std::string& original_input_id) {
+  assert(result.status == EngineProcessStatus::Duplicate);
+  assert(result.empty());
+  assert(result.duplicate.has_value());
+  assert(result.duplicate->reason == reason);
+  assert(result.duplicate->key == key);
+  assert(result.duplicate->original_topic == EngineInputTopic);
+  assert(result.duplicate->original_partition == 0);
+  assert(result.duplicate->original_offset == original_offset);
+  assert(result.duplicate->original_input_id.has_value());
+  assert(*result.duplicate->original_input_id == original_input_id);
+}
+
+std::string place_order_json(const std::string& input_id,
+                             const std::string& request_id,
+                             const std::string& idempotency_key,
+                             std::int64_t order_id,
+                             const std::string& reservation_id) {
+  std::ostringstream json;
+  json << R"json({
+  "type": "PlaceOrder",
+  "payload": {
+    "input_id": ")json"
+       << input_id << R"json(",
+    "envelope": {
+      "request_id": ")json"
+       << request_id << R"json(",
+      "idempotency_key": ")json"
+       << idempotency_key << R"json(",
+      "user_id": 42,
+      "reply_partition": 0
+    },
+    "reservation_id": ")json"
+       << reservation_id << R"json(",
+    "order_id": )json"
+       << order_id << R"json(,
+    "market_id": 1,
+    "market_name": "SOL-PERP",
+    "side": "LONG",
+    "order_type": "LIMIT",
+    "quantity": 10,
+    "price": 100,
+    "reduce_only": false,
+    "margin_asset": "USDC",
+    "reserved_margin_amount": 100,
+    "leverage": 10
+  }
+})json";
+  return json.str();
+}
+
+std::string cancel_order_json(const std::string& input_id,
+                              const std::string& request_id,
+                              const std::string& idempotency_key,
+                              std::int64_t order_id) {
+  std::ostringstream json;
+  json << R"json({
+  "type": "CancelOrder",
+  "payload": {
+    "input_id": ")json"
+       << input_id << R"json(",
+    "envelope": {
+      "request_id": ")json"
+       << request_id << R"json(",
+      "idempotency_key": ")json"
+       << idempotency_key << R"json(",
+      "user_id": 42,
+      "reply_partition": 0
+    },
+    "market_id": 1,
+    "order_id": )json"
+       << order_id << R"json(
+  }
+})json";
+  return json.str();
 }
 
 std::string crossing_order_json() {
@@ -155,6 +322,13 @@ void test_runtime_resting_limit_order() {
   assert(reply.payload.at("order_id") == "9001");
   assert(reply.payload.at("reservation_id") == "res_place_001");
 
+  const auto accepted_message = parse_serialized_output(reply);
+  assert_payload_string(accepted_message, "request_id", "req_place_001");
+  assert_payload_string(accepted_message, "source_input_id", "input_place_001");
+  assert_payload_number(accepted_message, "source_input_offset", "1201");
+  assert_payload_number(accepted_message, "order_id", "9001");
+  assert_payload_string(accepted_message, "reservation_id", "res_place_001");
+
   const auto* opened = find_record(result.events, "OrderOpened");
   assert(opened != nullptr);
   assert(opened->payload.at("engine_sequence") == "1");
@@ -162,6 +336,13 @@ void test_runtime_resting_limit_order() {
   assert(opened->payload.at("source_input_offset") == "1201");
   assert(opened->payload.at("order_id") == "9001");
   assert(opened->payload.at("market_id") == "1");
+
+  const auto opened_message = parse_serialized_output(*opened);
+  assert_payload_number(opened_message, "engine_sequence", "1");
+  assert_payload_number(opened_message, "engine_timestamp_ms", "1710000000000");
+  assert_payload_number(opened_message, "source_input_offset", "1201");
+  assert_payload_number(opened_message, "order_id", "9001");
+  assert_payload_number(opened_message, "market_id", "1");
 
   const auto* delta = find_record(result.events, "OrderBookDelta");
   assert(delta != nullptr);
@@ -171,6 +352,14 @@ void test_runtime_resting_limit_order() {
   assert(delta->payload.at("price") == "100");
   assert(delta->payload.at("quantity") == "10");
   assert(runtime.metadata_store().find(9001) != nullptr);
+
+  const auto delta_message = parse_serialized_output(*delta);
+  assert_payload_number(delta_message, "engine_sequence", "2");
+  assert_payload_number(delta_message, "market_id", "1");
+  assert_payload_number(delta_message, "source_input_offset", "1201");
+  assert_payload_string(delta_message, "side", "LONG");
+  assert_payload_number(delta_message, "price", "100");
+  assert_payload_number(delta_message, "quantity", "10");
 }
 
 void test_runtime_crossing_order_emits_trade() {
@@ -196,6 +385,22 @@ void test_runtime_crossing_order_emits_trade() {
   assert(trade->payload.at("taker_order_id") == "9002");
   assert(trade->payload.at("maker_reservation_id") == "res_place_001");
   assert(trade->payload.at("taker_reservation_id") == "res_taker_001");
+
+  const auto trade_message = parse_serialized_output(*trade);
+  assert_payload_number(trade_message, "engine_sequence", "3");
+  assert_payload_number(trade_message, "market_id", "1");
+  assert_payload_number(trade_message, "source_input_offset", "1202");
+  assert_payload_number(trade_message, "fill_id", "1");
+  assert_payload_number(trade_message, "price", "100");
+  assert_payload_number(trade_message, "quantity", "10");
+  assert_payload_number(trade_message, "maker_order_id", "9001");
+  assert_payload_number(trade_message, "taker_order_id", "9002");
+  assert_payload_string(trade_message,
+                        "maker_reservation_id",
+                        "res_place_001");
+  assert_payload_string(trade_message,
+                        "taker_reservation_id",
+                        "res_taker_001");
 
   const auto* delta = find_record(result.events, "OrderBookDelta");
   assert(delta != nullptr);
@@ -231,6 +436,229 @@ void test_runtime_cancel_order() {
   assert(runtime.metadata_store().empty());
 }
 
+void test_place_order_duplicate_input_id_is_silent() {
+  auto runtime = make_runtime();
+  const auto place = place_order_json("input_dedupe_place_001",
+                                      "req_dedupe_place_001",
+                                      "idem-dedupe-place-001",
+                                      9101,
+                                      "res_dedupe_place_001");
+
+  const auto first = runtime.process(make_record(place, 1301));
+  assert(first.status == EngineProcessStatus::Processed);
+  assert(first.duplicate == std::nullopt);
+  assert(first.replies.size() == 1);
+  assert(first.events.size() == 2);
+  assert(runtime.metadata_store().find(9101) != nullptr);
+
+  const auto second = runtime.process(make_record(place, 1301));
+  assert_duplicate_result(second,
+                          EngineDuplicateReason::InputId,
+                          "input_dedupe_place_001",
+                          1301,
+                          "input_dedupe_place_001");
+  assert(runtime.metadata_store().find(9101) != nullptr);
+}
+
+void test_place_order_duplicate_idempotency_is_silent() {
+  auto runtime = make_runtime();
+  const auto first_place = place_order_json("input_dedupe_idem_001",
+                                           "req_dedupe_idem_001",
+                                           "idem-shared-place-001",
+                                           9102,
+                                           "res_dedupe_idem_001");
+  const auto duplicate_place = place_order_json("input_dedupe_idem_002",
+                                               "req_dedupe_idem_002",
+                                               "idem-shared-place-001",
+                                               9103,
+                                               "res_dedupe_idem_002");
+
+  const auto first = runtime.process(make_record(first_place, 1311));
+  assert(first.status == EngineProcessStatus::Processed);
+  assert(first.replies.size() == 1);
+  assert(first.events.size() == 2);
+
+  const auto duplicate = runtime.process(make_record(duplicate_place, 1312));
+  assert_duplicate_result(duplicate,
+                          EngineDuplicateReason::IdempotencyKey,
+                          "idem-shared-place-001",
+                          1311,
+                          "input_dedupe_idem_001");
+  assert(runtime.metadata_store().find(9102) != nullptr);
+  assert(runtime.metadata_store().find(9103) == nullptr);
+}
+
+void test_same_order_id_different_idempotency_reaches_core() {
+  auto runtime = make_runtime();
+  const auto first_place = place_order_json("input_same_order_001",
+                                           "req_same_order_001",
+                                           "idem-same-order-001",
+                                           9104,
+                                           "res_same_order_001");
+  const auto duplicate_order = place_order_json("input_same_order_002",
+                                                "req_same_order_002",
+                                                "idem-same-order-002",
+                                                9104,
+                                                "res_same_order_002");
+
+  (void)runtime.process(make_record(first_place, 1321));
+  const auto result = runtime.process(make_record(duplicate_order, 1322));
+
+  assert(result.status == EngineProcessStatus::Processed);
+  assert(result.duplicate == std::nullopt);
+  assert(result.replies.size() == 1);
+  assert(result.events.empty());
+
+  const auto* rejected = find_record(result.replies, "OrderRejected");
+  assert(rejected != nullptr);
+  assert(rejected->payload.at("request_id") == "req_same_order_002");
+  assert(rejected->payload.at("source_input_id") == "input_same_order_002");
+  assert(rejected->payload.at("source_input_offset") == "1322");
+  assert(rejected->payload.at("order_id") == "9104");
+  assert(rejected->payload.at("reason") == "duplicate_order");
+}
+
+void test_cancel_duplicate_input_id_and_idempotency_are_silent() {
+  auto runtime = make_runtime();
+  const auto place = place_order_json("input_cancel_dedupe_place",
+                                      "req_cancel_dedupe_place",
+                                      "idem-cancel-dedupe-place",
+                                      9105,
+                                      "res_cancel_dedupe_place");
+  const auto cancel = cancel_order_json("input_cancel_dedupe_001",
+                                        "req_cancel_dedupe_001",
+                                        "idem-cancel-dedupe-001",
+                                        9105);
+  const auto cancel_same_idempotency =
+      cancel_order_json("input_cancel_dedupe_002",
+                        "req_cancel_dedupe_002",
+                        "idem-cancel-dedupe-001",
+                        9105);
+
+  (void)runtime.process(make_record(place, 1331));
+  const auto first_cancel = runtime.process(make_record(cancel, 1332));
+  assert(first_cancel.status == EngineProcessStatus::Processed);
+  assert(find_record(first_cancel.replies, "CancelAccepted") != nullptr);
+  assert(find_record(first_cancel.events, "OrderCancelled") != nullptr);
+  assert(runtime.metadata_store().empty());
+
+  const auto same_input = runtime.process(make_record(cancel, 1333));
+  assert_duplicate_result(same_input,
+                          EngineDuplicateReason::InputId,
+                          "input_cancel_dedupe_001",
+                          1332,
+                          "input_cancel_dedupe_001");
+
+  const auto same_idempotency =
+      runtime.process(make_record(cancel_same_idempotency, 1334));
+  assert_duplicate_result(same_idempotency,
+                          EngineDuplicateReason::IdempotencyKey,
+                          "idem-cancel-dedupe-001",
+                          1332,
+                          "input_cancel_dedupe_001");
+}
+
+void test_outbox_publishes_replies_then_events_with_routing_and_json() {
+  auto runtime = make_runtime();
+  const auto raw = read_file(
+      std::filesystem::path(PROTOCOL_EXAMPLES_DIR) /
+      "engine-place-order.command.json");
+  const auto result = runtime.process(make_record(raw, 1401));
+
+  CapturingPublisher publisher;
+  EngineOutbox outbox(publisher);
+  const auto publish_result = outbox.publish(result);
+
+  assert(publish_result.ok());
+  assert(publish_result.attempted == 3);
+  assert(publish_result.published == 3);
+  assert(publish_result.failures.empty());
+  assert(publisher.records.size() == 3);
+
+  const auto& reply = publisher.records[0].record;
+  assert(reply.topic == EngineRepliesTopic);
+  assert(reply.key == "req_place_001");
+  assert(reply.partition == 0);
+  assert(reply.type == "OrderAccepted");
+
+  const auto reply_message = parse_serialized_output_json(
+      reply, publisher.records[0].serialized_json);
+  assert_payload_string(reply_message, "request_id", "req_place_001");
+  assert_payload_number(reply_message, "source_input_offset", "1401");
+
+  const auto& opened = publisher.records[1].record;
+  assert(opened.topic == EngineEventsTopic);
+  assert(opened.key == "1");
+  assert(opened.partition == std::nullopt);
+  assert(opened.type == "OrderOpened");
+
+  const auto opened_message = parse_serialized_output_json(
+      opened, publisher.records[1].serialized_json);
+  assert_payload_number(opened_message, "market_id", "1");
+  assert_payload_number(opened_message, "engine_sequence", "1");
+
+  const auto& delta = publisher.records[2].record;
+  assert(delta.topic == EngineEventsTopic);
+  assert(delta.key == "1");
+  assert(delta.partition == std::nullopt);
+  assert(delta.type == "OrderBookDelta");
+
+  const auto delta_message = parse_serialized_output_json(
+      delta, publisher.records[2].serialized_json);
+  assert_payload_number(delta_message, "market_id", "1");
+  assert_payload_number(delta_message, "engine_sequence", "2");
+}
+
+void test_outbox_skips_duplicate_and_no_output_results() {
+  auto runtime = make_runtime();
+  const auto place = place_order_json("input_outbox_dedupe_001",
+                                      "req_outbox_dedupe_001",
+                                      "idem-outbox-dedupe-001",
+                                      9201,
+                                      "res_outbox_dedupe_001");
+
+  (void)runtime.process(make_record(place, 1411));
+  const auto duplicate = runtime.process(make_record(place, 1412));
+
+  CapturingPublisher publisher;
+  EngineOutbox outbox(publisher);
+  const auto duplicate_publish = outbox.publish(duplicate);
+  assert(duplicate_publish.ok());
+  assert(duplicate_publish.attempted == 0);
+  assert(duplicate_publish.published == 0);
+  assert(publisher.records.empty());
+
+  const EngineProcessResult no_output;
+  const auto no_output_publish = outbox.publish(no_output);
+  assert(no_output_publish.ok());
+  assert(no_output_publish.attempted == 0);
+  assert(no_output_publish.published == 0);
+  assert(publisher.records.empty());
+}
+
+void test_outbox_reports_publish_failures() {
+  auto runtime = make_runtime();
+  const auto raw = read_file(
+      std::filesystem::path(PROTOCOL_EXAMPLES_DIR) /
+      "engine-place-order.command.json");
+  const auto result = runtime.process(make_record(raw, 1421));
+
+  CapturingPublisher publisher;
+  publisher.next_error = "publisher unavailable";
+  EngineOutbox outbox(publisher);
+  const auto publish_result = outbox.publish(result);
+
+  assert(!publish_result.ok());
+  assert(publish_result.attempted == 3);
+  assert(publish_result.published == 2);
+  assert(publish_result.failures.size() == 1);
+  assert(publish_result.failures[0].topic == EngineRepliesTopic);
+  assert(publish_result.failures[0].key == "req_place_001");
+  assert(publish_result.failures[0].partition == 0);
+  assert(publish_result.failures[0].type == "OrderAccepted");
+  assert(publish_result.failures[0].error == "publisher unavailable");
+}
+
 }  // namespace
 
 int main() {
@@ -239,6 +667,13 @@ int main() {
     test_runtime_resting_limit_order();
     test_runtime_crossing_order_emits_trade();
     test_runtime_cancel_order();
+    test_place_order_duplicate_input_id_is_silent();
+    test_place_order_duplicate_idempotency_is_silent();
+    test_same_order_id_different_idempotency_reaches_core();
+    test_cancel_duplicate_input_id_and_idempotency_are_silent();
+    test_outbox_publishes_replies_then_events_with_routing_and_json();
+    test_outbox_skips_duplicate_and_no_output_results();
+    test_outbox_reports_publish_failures();
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';
     return EXIT_FAILURE;

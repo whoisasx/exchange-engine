@@ -1,6 +1,7 @@
 #include "runtime/EngineRuntime.hpp"
 
 #include <chrono>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 #include <variant>
@@ -89,11 +90,78 @@ void EngineRuntime::add_symbol(const SymbolConfig& symbol_config) {
   core_.add_symbol(symbol_config);
 }
 
+std::optional<EngineProcessResult> EngineRuntime::duplicate_result_for(
+    const std::optional<std::string>& input_id,
+    const std::string& idempotency_key) const {
+  if (input_id.has_value()) {
+    const auto input_it = processed_input_ids_.find(*input_id);
+    if (input_it != processed_input_ids_.end()) {
+      return make_duplicate_result(
+          EngineDuplicateReason::InputId, *input_id, input_it->second);
+    }
+  }
+
+  const auto idempotency_it =
+      processed_idempotency_keys_.find(idempotency_key);
+  if (idempotency_it != processed_idempotency_keys_.end()) {
+    return make_duplicate_result(EngineDuplicateReason::IdempotencyKey,
+                                 idempotency_key,
+                                 idempotency_it->second);
+  }
+
+  return std::nullopt;
+}
+
+EngineProcessResult EngineRuntime::make_duplicate_result(
+    EngineDuplicateReason reason,
+    const std::string& key,
+    const ProcessedRuntimeRequest& original) const {
+  EngineProcessResult result;
+  result.status = EngineProcessStatus::Duplicate;
+  result.duplicate = EngineDuplicateInfo{
+      .reason = reason,
+      .key = key,
+      .original_topic = original.topic,
+      .original_partition = original.partition,
+      .original_offset = original.offset,
+      .original_input_id = original.input_id,
+      .original_idempotency_key = original.idempotency_key,
+  };
+  return result;
+}
+
+void EngineRuntime::mark_processed(
+    RuntimeCommandKind command_kind,
+    const InboundEngineRecord& record,
+    const std::optional<std::string>& input_id,
+    const std::string& idempotency_key) {
+  ProcessedRuntimeRequest processed{
+      .command_kind = command_kind,
+      .topic = record.topic,
+      .partition = record.partition,
+      .offset = record.offset,
+      .input_id = input_id,
+      .idempotency_key = idempotency_key,
+  };
+
+  if (input_id.has_value()) {
+    (void)processed_input_ids_.emplace(*input_id, processed);
+  }
+  (void)processed_idempotency_keys_.emplace(idempotency_key,
+                                            std::move(processed));
+}
+
 EngineProcessResult EngineRuntime::process(const InboundEngineRecord& record) {
   ParsedEngineInput parsed = parser_.parse(record.raw_json);
 
   if (parsed.kind == ParsedEngineInputKind::PlaceOrder) {
     auto input = std::get<cex::adapter::PlaceOrderInput>(parsed.value);
+    if (auto duplicate = duplicate_result_for(
+            input.input_id, input.envelope.idempotency_key);
+        duplicate.has_value()) {
+      return *duplicate;
+    }
+
     input.source = broker_context(record);
 
     auto mapped =
@@ -114,10 +182,20 @@ EngineProcessResult EngineRuntime::process(const InboundEngineRecord& record) {
       }
     }
     cleanup_completed_order_metadata(metadata_store_, core_events);
+    mark_processed(RuntimeCommandKind::PlaceOrder,
+                   record,
+                   input.input_id,
+                   input.envelope.idempotency_key);
     return result;
   }
 
   auto input = std::get<cex::adapter::CancelOrderInput>(parsed.value);
+  if (auto duplicate = duplicate_result_for(input.input_id,
+                                            input.envelope.idempotency_key);
+      duplicate.has_value()) {
+    return *duplicate;
+  }
+
   input.source = broker_context(record);
 
   auto mapped =
@@ -128,6 +206,10 @@ EngineProcessResult EngineRuntime::process(const InboundEngineRecord& record) {
       core_events, context, metadata_store_, market_sequences_, clock_);
 
   cleanup_completed_order_metadata(metadata_store_, core_events);
+  mark_processed(RuntimeCommandKind::CancelOrder,
+                 record,
+                 input.input_id,
+                 input.envelope.idempotency_key);
   return result;
 }
 
@@ -143,6 +225,82 @@ const cex::adapter::OrderMetadataStore& EngineRuntime::metadata_store()
 const cex::adapter::MarketSequenceGenerator& EngineRuntime::market_sequences()
     const noexcept {
   return market_sequences_;
+}
+
+EngineRuntimeStateSnapshot EngineRuntime::snapshot_state() const {
+  EngineRuntimeStateSnapshot snapshot{
+      .core_snapshot = core_.snapshot(),
+      .metadata_store = metadata_store_,
+      .public_sequences = market_sequences_.snapshot(),
+  };
+
+  for (const auto& [key, processed] : processed_input_ids_) {
+    snapshot.processed_input_ids.emplace(
+        key,
+        EngineRuntimeProcessedRequestSnapshot{
+            .command_kind = processed.command_kind,
+            .topic = processed.topic,
+            .partition = processed.partition,
+            .offset = processed.offset,
+            .input_id = processed.input_id,
+            .idempotency_key = processed.idempotency_key,
+        });
+  }
+
+  for (const auto& [key, processed] : processed_idempotency_keys_) {
+    snapshot.processed_idempotency_keys.emplace(
+        key,
+        EngineRuntimeProcessedRequestSnapshot{
+            .command_kind = processed.command_kind,
+            .topic = processed.topic,
+            .partition = processed.partition,
+            .offset = processed.offset,
+            .input_id = processed.input_id,
+            .idempotency_key = processed.idempotency_key,
+        });
+  }
+
+  return snapshot;
+}
+
+void EngineRuntime::restore_state(
+    const EngineRuntimeStateSnapshot& snapshot) {
+  core_.restore(snapshot.core_snapshot);
+  metadata_store_ = snapshot.metadata_store;
+
+  market_sequences_ =
+      cex::adapter::MarketSequenceGenerator(config_.first_public_sequence);
+  for (const auto& [market_id, next_sequence] : snapshot.public_sequences) {
+    market_sequences_.restore(market_id, next_sequence);
+  }
+
+  processed_input_ids_.clear();
+  for (const auto& [key, processed] : snapshot.processed_input_ids) {
+    processed_input_ids_.emplace(
+        key,
+        ProcessedRuntimeRequest{
+            .command_kind = processed.command_kind,
+            .topic = processed.topic,
+            .partition = processed.partition,
+            .offset = processed.offset,
+            .input_id = processed.input_id,
+            .idempotency_key = processed.idempotency_key,
+        });
+  }
+
+  processed_idempotency_keys_.clear();
+  for (const auto& [key, processed] : snapshot.processed_idempotency_keys) {
+    processed_idempotency_keys_.emplace(
+        key,
+        ProcessedRuntimeRequest{
+            .command_kind = processed.command_kind,
+            .topic = processed.topic,
+            .partition = processed.partition,
+            .offset = processed.offset,
+            .input_id = processed.input_id,
+            .idempotency_key = processed.idempotency_key,
+        });
+  }
 }
 
 EngineEventTranslationContext EngineRuntime::make_translation_context(

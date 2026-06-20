@@ -34,7 +34,30 @@ struct EngineOutputRecord {
   PayloadFields payload;
 };
 
+enum class EngineProcessStatus {
+  Processed,
+  Duplicate,
+};
+
+enum class EngineDuplicateReason {
+  None,
+  InputId,
+  IdempotencyKey,
+};
+
+struct EngineDuplicateInfo {
+  EngineDuplicateReason reason{EngineDuplicateReason::None};
+  std::string key;
+  std::string original_topic{EngineInputTopic};
+  std::int32_t original_partition{0};
+  std::int64_t original_offset{0};
+  std::optional<std::string> original_input_id;
+  std::string original_idempotency_key;
+};
+
 struct EngineProcessResult {
+  EngineProcessStatus status{EngineProcessStatus::Processed};
+  std::optional<EngineDuplicateInfo> duplicate;
   std::vector<EngineOutputRecord> replies;
   std::vector<EngineOutputRecord> events;
 

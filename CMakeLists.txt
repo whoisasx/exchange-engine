@@ -83,6 +83,8 @@ target_include_directories(engine_protocol
 add_library(engine_runtime
   src/runtime/EngineEventTranslator.cpp
   src/runtime/EngineInputParser.cpp
+  src/runtime/EngineOutbox.cpp
+  src/runtime/EngineOutputSerializer.cpp
   src/runtime/EngineRuntime.cpp
 )
 add_library(cex::engine_runtime ALIAS engine_runtime)
@@ -100,6 +102,43 @@ target_link_libraries(engine_runtime
     cex::core_engine
     cex::engine_adapter
     cex::engine_protocol
+)
+
+add_library(engine_checkpoint
+  src/checkpoint/EngineCheckpointManager.cpp
+  src/checkpoint/InMemoryCheckpointStore.cpp
+)
+add_library(cex::engine_checkpoint ALIAS engine_checkpoint)
+
+target_compile_features(engine_checkpoint PUBLIC cxx_std_20)
+
+target_include_directories(engine_checkpoint
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+
+target_link_libraries(engine_checkpoint
+  PUBLIC
+    cex::engine_runtime
+)
+
+add_library(engine_broker
+  src/broker/RedpandaEngineApp.cpp
+)
+add_library(cex::engine_broker ALIAS engine_broker)
+
+target_compile_features(engine_broker PUBLIC cxx_std_20)
+
+target_include_directories(engine_broker
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+
+target_link_libraries(engine_broker
+  PUBLIC
+    cex::engine_runtime
 )
 
 include(CTest)
@@ -150,6 +189,33 @@ if(BUILD_TESTING)
   )
 
   add_test(NAME runtime_tests COMMAND runtime_tests)
+
+  add_executable(checkpoint_tests
+    tests/checkpoint/CheckpointTests.cpp
+  )
+
+  target_link_libraries(checkpoint_tests
+    PRIVATE
+      cex::engine_checkpoint
+  )
+
+  add_test(NAME checkpoint_tests COMMAND checkpoint_tests)
+
+  add_executable(broker_tests
+    tests/broker/RedpandaEngineAppTests.cpp
+  )
+
+  target_link_libraries(broker_tests
+    PRIVATE
+      cex::engine_broker
+  )
+
+  target_compile_definitions(broker_tests
+    PRIVATE
+      PROTOCOL_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/docs/examples"
+  )
+
+  add_test(NAME broker_tests COMMAND broker_tests)
 
   add_executable(service_contract_tests
     tests/services/ServiceContractsTest.cpp
