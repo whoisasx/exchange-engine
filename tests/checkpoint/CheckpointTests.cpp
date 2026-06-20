@@ -3,7 +3,9 @@
 
 #include <cassert>
 #include <cstdlib>
+#include <exception>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -62,6 +64,10 @@ const EngineOutputRecord* find_record(
     }
   }
   return nullptr;
+}
+
+void assert_contains(const std::string& value, const std::string& token) {
+  assert(value.find(token) != std::string::npos);
 }
 
 std::string place_order_json() {
@@ -148,6 +154,48 @@ void test_create_checkpoint_captures_recovery_state() {
   assert(checkpoint.processed_idempotency_keys.contains("client-order-001"));
 }
 
+void test_checkpoint_source_position_validation_is_explicit() {
+  assert(!validate_checkpoint_source_position(CheckpointSourcePosition{
+                                                    .topic = EngineInputTopic,
+                                                    .partition = 0,
+                                                    .next_offset = 1202,
+                                                })
+              .has_value());
+
+  const auto empty_topic = validate_checkpoint_source_position(
+      CheckpointSourcePosition{.topic = "", .partition = 0, .next_offset = 0});
+  assert(empty_topic.has_value());
+  assert_contains(*empty_topic, "topic");
+
+  const auto negative_partition = validate_checkpoint_source_position(
+      CheckpointSourcePosition{
+          .topic = EngineInputTopic, .partition = -1, .next_offset = 0});
+  assert(negative_partition.has_value());
+  assert_contains(*negative_partition, "partition");
+
+  const auto negative_offset = validate_checkpoint_source_position(
+      CheckpointSourcePosition{
+          .topic = EngineInputTopic, .partition = 0, .next_offset = -1});
+  assert(negative_offset.has_value());
+  assert_contains(*negative_offset, "next_offset");
+}
+
+void test_create_checkpoint_rejects_invalid_source_position() {
+  auto runtime = make_runtime();
+  EngineCheckpointManager manager;
+
+  try {
+    (void)manager.create_checkpoint(
+        runtime,
+        CheckpointSourcePosition{
+            .topic = EngineInputTopic, .partition = 0, .next_offset = -1},
+        "invalid-source-position");
+    assert(false);
+  } catch (const std::invalid_argument& error) {
+    assert_contains(error.what(), "next_offset");
+  }
+}
+
 void test_in_memory_store_saves_and_loads_latest() {
   InMemoryCheckpointStore store;
   assert(!store.load_latest().has_value());
@@ -160,6 +208,29 @@ void test_in_memory_store_saves_and_loads_latest() {
   assert(latest->checkpoint_id == "checkpoint-2");
   assert(latest->source_position.next_offset == 1202);
   assert(store.size() == 2);
+}
+
+void test_checkpoint_next_offset_is_exclusive_replay_boundary() {
+  const auto checkpoint = make_checkpoint();
+
+  auto restored = make_runtime();
+  EngineCheckpointManager manager;
+  manager.restore_runtime(checkpoint, restored);
+
+  const auto included = restored.process_replay(
+      make_record(place_order_json(),
+                  checkpoint.source_position.next_offset - 1));
+  assert(included.status == EngineProcessStatus::Duplicate);
+  assert(included.empty());
+  assert(included.duplicate.has_value());
+  assert(included.duplicate->original_offset == 1201);
+  assert(restored.metadata_store().find(9001) != nullptr);
+
+  const auto replayed = restored.process_replay(
+      make_record(cancel_order_json(), checkpoint.source_position.next_offset));
+  assert(replayed.status == EngineProcessStatus::Processed);
+  assert(replayed.empty());
+  assert(restored.metadata_store().empty());
 }
 
 void test_restore_runtime_can_continue_and_cancel_resting_order() {
@@ -198,13 +269,32 @@ void test_restore_runtime_can_continue_and_cancel_resting_order() {
   assert(restored.metadata_store().empty());
 }
 
+void test_restore_runtime_rejects_invalid_source_position() {
+  auto checkpoint = make_checkpoint();
+  checkpoint.source_position.next_offset = -1;
+
+  auto restored = make_runtime();
+  EngineCheckpointManager manager;
+
+  try {
+    manager.restore_runtime(checkpoint, restored);
+    assert(false);
+  } catch (const std::invalid_argument& error) {
+    assert_contains(error.what(), "next_offset");
+  }
+}
+
 }  // namespace
 
 int main() {
   try {
     test_create_checkpoint_captures_recovery_state();
+    test_checkpoint_source_position_validation_is_explicit();
+    test_create_checkpoint_rejects_invalid_source_position();
     test_in_memory_store_saves_and_loads_latest();
+    test_checkpoint_next_offset_is_exclusive_replay_boundary();
     test_restore_runtime_can_continue_and_cancel_resting_order();
+    test_restore_runtime_rejects_invalid_source_position();
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';
     return EXIT_FAILURE;

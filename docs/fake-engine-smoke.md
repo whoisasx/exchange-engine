@@ -17,16 +17,18 @@ handling, and a cancel flow. It asserts replies/events are serialized to
 parseable JSON and verifies public `TradeExecuted` / `OrderBookDelta`
 `engine_sequence` behavior.
 
-Redpanda is optional for this local smoke. If `rpk` is installed, the script
-prints the local `engine.input` provisioning commands. To run those commands
-against an available local Redpanda cluster:
+Redpanda is optional for this local smoke. When `rpk`, a reachable local
+Redpanda cluster, and a built `engine_app` executable are available, the script
+also runs the broker-backed engine app smoke documented in
+`engine-app-smoke.md`. To require that optional path instead of skipping it when
+prerequisites are absent:
 
 ```sh
-scripts/engine-smoke.sh --provision-redpanda
+scripts/engine-smoke.sh --require-redpanda
 ```
 
-The provisioning keeps `engine.input` explicit as a single-partition topic with
-`retention.ms=1800000`:
+The broker-backed path keeps `engine.input` explicit as a single-partition topic
+with `retention.ms=1800000`:
 
 ```sh
 rpk topic create --if-not-exists --partitions 1 -c retention.ms=1800000 engine.input

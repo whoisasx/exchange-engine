@@ -26,6 +26,7 @@ inline constexpr const char* ConsumerGroupIdEnv = "CEX_ENGINE_GROUP_ID";
 inline constexpr const char* CheckpointDirectoryEnv =
     "CEX_ENGINE_CHECKPOINT_DIR";
 inline constexpr const char* PollLoopLimitEnv = "CEX_ENGINE_POLL_LIMIT";
+inline constexpr const char* MarketsConfigEnv = "CEX_ENGINE_MARKETS_CONFIG";
 
 struct EngineMarketConfig {
   cex::adapter::MarketId market_id{DefaultMarketId};
@@ -50,6 +51,7 @@ struct EngineAppEnvironment {
   std::optional<std::string> consumer_group_id;
   std::optional<std::string> checkpoint_directory;
   std::optional<std::string> poll_loop_limit;
+  std::optional<std::string> markets_config;
 };
 
 struct EngineAppConfigParseResult {

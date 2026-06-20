@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <unordered_map>
 
@@ -17,6 +18,9 @@ struct CheckpointSourcePosition {
   std::int32_t partition{0};
   std::int64_t next_offset{0};
 };
+
+[[nodiscard]] std::optional<std::string> validate_checkpoint_source_position(
+    const CheckpointSourcePosition& position);
 
 struct EngineCheckpoint {
   std::uint32_t schema_version{CurrentEngineCheckpointSchemaVersion};

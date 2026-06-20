@@ -56,6 +56,18 @@ For every `market_id`, the engine must emit a strictly increasing `engine_sequen
 
 Engine events must be self-routeable by payload. WebSocket consumers must not need database lookups to identify the affected account or market.
 
+## Checkpoint And Offset Contract
+
+`EngineCheckpoint.source_position` records the input topic, partition, and exclusive `next_offset` represented by the checkpoint. `next_offset=N` means every input offset `< N` for that source partition is already included in engine state and deduplication metadata. Recovery must seek the input consumer to exactly `N` and silently replay `[N, high_watermark)`.
+
+Broker committed offsets are not the recovery source of truth. They are operational resume hints and should align with checkpoint progress after a successful live cycle. The production-safe live order is:
+
+1. Process one input and durably publish its replies/events.
+2. Save a checkpoint with `source_position.next_offset = input.offset + 1`.
+3. Commit the consumed input offset. The current rdkafka committer stores `input.offset + 1` as the Kafka resume offset.
+
+If checkpoint save fails, the engine must fail loudly and not commit the input offset. A crash after checkpoint save but before commit is recoverable because startup recovery seeks to the checkpoint `next_offset`. A crash after commit but before checkpoint is unsafe when startup relies on the consumer group position, so app startup must use checkpoint recovery and live processing must place checkpoint durability before broker commit.
+
 ## Common Types
 
 Enums are serialized as exact uppercase strings:
@@ -269,7 +281,7 @@ source_input_id and source_input_offset: optional source engine input identity f
 
 Producers should set `engine_event_id` and keep it stable across retries of the same emitted event. Consumers use it to deduplicate exact event delivery when present. Consumers use `(market_id, engine_sequence)` for market ordering and gap detection. For ordering, consumers should trust `engine_sequence` before `engine_timestamp_ms`; timestamps are for bucketing, display, and latency analysis.
 
-`EngineCheckpointCommitted` is engine-wide. It carries checkpoint metadata, `engine_input_next_offset`, and `market_sequences` instead of a single `market_id` and `engine_sequence`.
+`EngineCheckpointCommitted` is engine-wide. It carries checkpoint metadata, `engine_input_next_offset`, and `market_sequences` instead of a single `market_id` and `engine_sequence`. For MVP this event is future audit only; engine recovery uses the private checkpoint artifact plus the retained `engine.input` log.
 
 Event fixture locations under `docs/examples`:
 

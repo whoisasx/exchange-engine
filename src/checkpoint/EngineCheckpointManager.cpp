@@ -1,14 +1,49 @@
 #include "checkpoint/EngineCheckpointManager.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 
 namespace cex::checkpoint {
+namespace {
+
+[[nodiscard]] bool blank(std::string_view value) {
+  return std::ranges::all_of(value, [](unsigned char ch) {
+    return std::isspace(ch) != 0;
+  });
+}
+
+void require_valid_source_position(
+    const CheckpointSourcePosition& source_position) {
+  if (auto error = validate_checkpoint_source_position(source_position);
+      error.has_value()) {
+    throw std::invalid_argument(*error);
+  }
+}
+
+}  // namespace
+
+std::optional<std::string> validate_checkpoint_source_position(
+    const CheckpointSourcePosition& position) {
+  if (blank(position.topic)) {
+    return "checkpoint source topic must not be empty";
+  }
+  if (position.partition < 0) {
+    return "checkpoint source partition must not be negative";
+  }
+  if (position.next_offset < 0) {
+    return "checkpoint source next_offset must not be negative";
+  }
+  return std::nullopt;
+}
 
 EngineCheckpoint EngineCheckpointManager::create_checkpoint(
     const cex::runtime::EngineRuntime& runtime,
     CheckpointSourcePosition source_position,
     std::string checkpoint_id) const {
+  require_valid_source_position(source_position);
   auto runtime_snapshot = runtime.snapshot_state();
 
   return EngineCheckpoint{
@@ -30,6 +65,7 @@ void EngineCheckpointManager::restore_runtime(
   if (checkpoint.schema_version != CurrentEngineCheckpointSchemaVersion) {
     throw std::invalid_argument("unsupported engine checkpoint schema version");
   }
+  require_valid_source_position(checkpoint.source_position);
 
   runtime.restore_state(cex::runtime::EngineRuntimeStateSnapshot{
       .core_snapshot = checkpoint.core_snapshot,

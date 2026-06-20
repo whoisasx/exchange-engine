@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -117,11 +118,16 @@ class IEngineOffsetCommitter {
       const OffsetCommitRequest& request) = 0;
 };
 
+using EnginePreCommitHook = std::function<std::optional<std::string>(
+    const ConsumedRecord& source,
+    const runtime::EngineRuntime& runtime)>;
+
 enum class EngineBrokerAppStatus {
   NoRecord,
   Processed,
   RejectedInputTopic,
   PublishFailed,
+  CheckpointFailed,
   CommitFailed,
   ProcessingFailed,
   UnsafeDuplicate,
@@ -146,7 +152,8 @@ class RedpandaEngineApp {
   RedpandaEngineApp(IEngineInputConsumer& consumer,
                     IEngineRecordProducer& producer,
                     IEngineOffsetCommitter& committer,
-                    runtime::EngineRuntime& runtime);
+                    runtime::EngineRuntime& runtime,
+                    EnginePreCommitHook pre_commit_hook = {});
 
   [[nodiscard]] EngineBrokerAppResult poll_once();
   [[nodiscard]] EngineBrokerAppResult consume(const ConsumedRecord& record);
@@ -160,6 +167,7 @@ class RedpandaEngineApp {
   IEngineRecordProducer& producer_;
   IEngineOffsetCommitter& committer_;
   runtime::EngineRuntime& runtime_;
+  EnginePreCommitHook pre_commit_hook_;
   std::vector<OffsetCommitRequest> committed_offsets_;
 };
 

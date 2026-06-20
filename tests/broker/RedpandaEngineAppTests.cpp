@@ -129,8 +129,14 @@ class FakeProducer final : public IEngineRecordProducer {
 
 class FakeCommitter final : public IEngineOffsetCommitter {
  public:
+  explicit FakeCommitter(std::vector<std::string>* operations = nullptr)
+      : operations_(operations) {}
+
   std::optional<std::string> commit(
       const OffsetCommitRequest& request) override {
+    if (operations_ != nullptr) {
+      operations_->push_back("commit");
+    }
     commits.push_back(request);
     if (fail_next.has_value()) {
       std::optional<std::string> error = std::move(fail_next);
@@ -142,6 +148,9 @@ class FakeCommitter final : public IEngineOffsetCommitter {
 
   std::vector<OffsetCommitRequest> commits;
   std::optional<std::string> fail_next;
+
+ private:
+  std::vector<std::string>* operations_{nullptr};
 };
 
 void assert_contains(const std::string& value, const std::string& token) {
@@ -261,9 +270,21 @@ void test_successful_place_order_publishes_then_commits() {
   const auto place_order = place_order_fixture();
   FakeConsumer consumer({make_input_record(101, place_order)});
   FakeProducer producer;
-  FakeCommitter committer;
+  std::vector<std::string> operations;
+  FakeCommitter committer(&operations);
   auto runtime = make_runtime();
-  RedpandaEngineApp app(consumer, producer, committer, runtime);
+  RedpandaEngineApp app(
+      consumer,
+      producer,
+      committer,
+      runtime,
+      [&](const ConsumedRecord& source,
+          const cex::runtime::EngineRuntime& hook_runtime) {
+        assert(source.offset == 101);
+        assert(hook_runtime.metadata_store().find(9001) != nullptr);
+        operations.push_back("checkpoint");
+        return std::nullopt;
+      });
 
   const auto result = app.poll_once();
 
@@ -283,6 +304,7 @@ void test_successful_place_order_publishes_then_commits() {
   assert(producer.records[1].partition == std::nullopt);
   assert(producer.records[2].topic == EngineEventsTopic);
   assert_committed_source_offset(committer, 101);
+  assert((operations == std::vector<std::string>{"checkpoint", "commit"}));
 }
 
 void test_publish_failure_does_not_commit() {
@@ -303,6 +325,33 @@ void test_publish_failure_does_not_commit() {
   assert(result.publish_result.published == 2);
   assert(result.error == "broker unavailable");
   assert(committer.commits.empty());
+}
+
+void test_checkpoint_failure_does_not_commit() {
+  const auto place_order = place_order_fixture();
+  FakeConsumer consumer({make_input_record(251, place_order)});
+  FakeProducer producer;
+  FakeCommitter committer;
+  auto runtime = make_runtime();
+  RedpandaEngineApp app(
+      consumer,
+      producer,
+      committer,
+      runtime,
+      [](const ConsumedRecord&,
+         const cex::runtime::EngineRuntime&) -> std::optional<std::string> {
+        return "checkpoint disk full";
+      });
+
+  const auto result = app.poll_once();
+
+  assert(result.status == EngineBrokerAppStatus::CheckpointFailed);
+  assert(!result.committed);
+  assert(result.publish_result.ok());
+  assert(result.publish_result.published == 3);
+  assert(producer.records.size() == 3);
+  assert(committer.commits.empty());
+  assert(result.error == "checkpoint disk full");
 }
 
 void test_duplicate_no_output_result_commits_without_publishes() {
@@ -362,6 +411,7 @@ int main() {
     test_seek_to_high_watermark_is_valid_end_position();
     test_successful_place_order_publishes_then_commits();
     test_publish_failure_does_not_commit();
+    test_checkpoint_failure_does_not_commit();
     test_duplicate_no_output_result_commits_without_publishes();
     test_wrong_input_topic_is_rejected_without_commit();
   } catch (const std::exception& error) {

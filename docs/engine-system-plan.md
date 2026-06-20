@@ -13,7 +13,14 @@ This plan describes the intended engine flow before the external C++ engine is b
 - Funding rate is a separate ordered input, sent on the funding cadence.
 - Liquidation runs after trades, mark updates, funding settlement, and startup restore.
 - Engine recovery uses private engine checkpoints. Orderbook snapshots are public market-data artifacts and are not enough for recovery.
+- `EngineCheckpoint.source_position.next_offset` is an exclusive input-log boundary: all offsets lower than it are included in checkpoint state, and it is the first offset recovery may replay.
+- Checkpoints are the recovery source of truth. Broker committed offsets are operational resume hints and must not advance past the latest durable checkpoint boundary.
 - Queue retention can stay at 30 minutes for now, with the known limitation that recovery fails if the latest valid checkpoint is older than retained input data.
+- `engine_app` starts with a built-in SOL-PERP market unless `--markets-config <path>` or `CEX_ENGINE_MARKETS_CONFIG` points at a market config file.
+
+## Engine App Market Config
+
+The initial market config file is a dependency-free line format. Use one `[[market]]` section per market with `key=value` fields for `market_id`, `market_name`, `tick_size`, `lot_size`, `min_quantity`, `max_quantity`, `min_price`, `max_price`, `ring_capacity_ticks`, `threshold_percentage`, `initial_base_tick`, `price_scale`, `quantity_scale`, `maker_fee_rate`, `taker_fee_rate`, and `trading_enabled`.
 
 ## High-Level Flow
 
@@ -208,7 +215,8 @@ For each input:
 6. Run the liquidation loop if the input can affect risk.
 7. Append replies and events.
 8. Publish replies and events.
-9. Advance checkpoint/outbox state.
+9. Durably advance checkpoint/outbox state.
+10. Commit the consumed input offset only after the matching checkpoint boundary is durable.
 
 ## Liquidation Triggers
 
@@ -338,19 +346,40 @@ An `EngineCheckpoint` must include:
 - generated ID counters
 - per-market engine sequences
 - processed input IDs
-- engine input offset
+- source position: input topic, partition, and exclusive `next_offset`
+
+MVP offset contract:
+
+- `source_position.next_offset` means the checkpoint includes every input offset `< next_offset` for its source topic and partition.
+- Recovery validates that `next_offset` is within the retained broker watermark range, seeks the input consumer to exactly `next_offset`, and silently replays the half-open range `[next_offset, high_watermark)`.
+- Silent recovery replay rebuilds runtime state and deduplication metadata without publishing replies or events.
+- The checkpoint boundary is authoritative for recovery. A broker committed offset may be behind the latest checkpoint after a crash, but it must not be committed ahead of the latest durable checkpoint in steady state.
 
 Restore flow:
 
 1. Load latest complete engine checkpoint.
 2. Verify checksum and schema/config version.
-3. Verify the checkpoint input offset is still within retained input data.
-4. Replay engine inputs after the checkpoint in silent/rebuild mode.
+3. Verify the checkpoint source `next_offset` is still within retained input data.
+4. Seek to `next_offset` and replay engine inputs in `[next_offset, high_watermark)` in silent/rebuild mode.
 5. Do not publish during recovery replay.
 6. Once caught up, switch to live mode and publish outputs for new inputs.
 7. Run invariant checks before serving live traffic.
 
 For MVP, queue retention remains 30 minutes. The engine must fail loudly if it cannot replay from the latest checkpoint because the input queue has already discarded needed records.
+
+Live commit/checkpoint ordering:
+
+1. Process one input and publish its replies/events.
+2. Save an engine checkpoint whose `source_position.next_offset` is `input.offset + 1`.
+3. Commit the consumed input offset to Redpanda. The rdkafka wrapper stores `offset + 1` as the Kafka resume offset.
+
+The current `apps/engine/main.cpp` path uses
+`RecoveryCoordinator::recover_and_replay()` at startup and passes a checkpoint
+hook into `RedpandaEngineApp` for live polling. The hook runs after output
+publish succeeds and before `RdKafkaOffsetCommitter::commit`, so a checkpoint
+save failure returns a fatal error without committing the input offset.
+
+`EngineCheckpointCommitted` can later be emitted as an audit event after checkpoint durability is confirmed. It should carry the checkpoint id, `engine_input_next_offset`, location/checksum metadata, and per-market sequence summary, but recovery must not depend on that public event for MVP.
 
 ## Example Flow
 

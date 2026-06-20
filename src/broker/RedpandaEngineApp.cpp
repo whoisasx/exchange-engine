@@ -58,11 +58,13 @@ class ProducerBackedPublisher final : public runtime::IEnginePublisher {
 RedpandaEngineApp::RedpandaEngineApp(IEngineInputConsumer& consumer,
                                      IEngineRecordProducer& producer,
                                      IEngineOffsetCommitter& committer,
-                                     runtime::EngineRuntime& runtime)
+                                     runtime::EngineRuntime& runtime,
+                                     EnginePreCommitHook pre_commit_hook)
     : consumer_(consumer),
       producer_(producer),
       committer_(committer),
-      runtime_(runtime) {}
+      runtime_(runtime),
+      pre_commit_hook_(std::move(pre_commit_hook)) {}
 
 EngineBrokerAppResult RedpandaEngineApp::poll_once() {
   auto record = consumer_.poll();
@@ -122,6 +124,20 @@ EngineBrokerAppResult RedpandaEngineApp::consume(
   }
 
   const OffsetCommitRequest commit_request = source_offset(record);
+  if (pre_commit_hook_) {
+    try {
+      if (auto error = pre_commit_hook_(record, runtime_); error.has_value()) {
+        result.status = EngineBrokerAppStatus::CheckpointFailed;
+        result.error = std::move(*error);
+        return result;
+      }
+    } catch (const std::exception& error) {
+      result.status = EngineBrokerAppStatus::CheckpointFailed;
+      result.error = error.what();
+      return result;
+    }
+  }
+
   if (auto error = committer_.commit(commit_request); error.has_value()) {
     result.status = EngineBrokerAppStatus::CommitFailed;
     result.error = std::move(*error);

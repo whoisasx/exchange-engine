@@ -267,7 +267,7 @@ if(TARGET cex::engine_broker_rdkafka)
   target_link_libraries(engine_app
     PRIVATE
       cex::engine_app_config
-      cex::engine_checkpoint
+      cex::engine_recovery
       cex::engine_broker_rdkafka
   )
 else()
