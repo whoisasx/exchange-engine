@@ -75,6 +75,15 @@ void cleanup_completed_order_metadata(
           input.time_in_force == cex::adapter::AdapterTimeInForce::PostOnly);
 }
 
+EngineProcessResult apply_processing_mode(EngineProcessResult result,
+                                          ProcessingMode mode) {
+  if (mode == ProcessingMode::ReplaySilent) {
+    result.replies.clear();
+    result.events.clear();
+  }
+  return result;
+}
+
 }  // namespace
 
 EngineRuntime::EngineRuntime(EngineRuntimeConfig config)
@@ -151,7 +160,8 @@ void EngineRuntime::mark_processed(
                                             std::move(processed));
 }
 
-EngineProcessResult EngineRuntime::process(const InboundEngineRecord& record) {
+EngineProcessResult EngineRuntime::process(const InboundEngineRecord& record,
+                                           ProcessingMode mode) {
   ParsedEngineInput parsed = parser_.parse(record.raw_json);
 
   if (parsed.kind == ParsedEngineInputKind::PlaceOrder) {
@@ -159,6 +169,9 @@ EngineProcessResult EngineRuntime::process(const InboundEngineRecord& record) {
     if (auto duplicate = duplicate_result_for(
             input.input_id, input.envelope.idempotency_key);
         duplicate.has_value()) {
+      // Duplicate detection runs before mode-specific output handling. During
+      // replay, restored processed maps mean the original command is already
+      // part of state, so duplicates stay silent and are not re-applied.
       return *duplicate;
     }
 
@@ -186,13 +199,14 @@ EngineProcessResult EngineRuntime::process(const InboundEngineRecord& record) {
                    record,
                    input.input_id,
                    input.envelope.idempotency_key);
-    return result;
+    return apply_processing_mode(std::move(result), mode);
   }
 
   auto input = std::get<cex::adapter::CancelOrderInput>(parsed.value);
   if (auto duplicate = duplicate_result_for(input.input_id,
                                             input.envelope.idempotency_key);
       duplicate.has_value()) {
+    // See the place-order duplicate branch for replay behavior.
     return *duplicate;
   }
 
@@ -210,7 +224,12 @@ EngineProcessResult EngineRuntime::process(const InboundEngineRecord& record) {
                  record,
                  input.input_id,
                  input.envelope.idempotency_key);
-  return result;
+  return apply_processing_mode(std::move(result), mode);
+}
+
+EngineProcessResult EngineRuntime::process_replay(
+    const InboundEngineRecord& record) {
+  return process(record, ProcessingMode::ReplaySilent);
 }
 
 const EngineCore& EngineRuntime::core() const noexcept {

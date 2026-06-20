@@ -6,6 +6,7 @@
 #include <iostream>
 #include <optional>
 #include <string>
+#include <type_traits>
 
 using namespace cex::broker;
 
@@ -48,6 +49,14 @@ void test_consumer_config_validation() {
   config = RdKafkaConsumerConfig{};
   config.poll_timeout = std::chrono::milliseconds{-1};
   assert_config_error_contains(validate_config(config), "poll_timeout");
+
+  config = RdKafkaConsumerConfig{};
+  config.seek_timeout = std::chrono::milliseconds{-1};
+  assert_config_error_contains(validate_config(config), "seek_timeout");
+
+  config = RdKafkaConsumerConfig{};
+  config.watermark_timeout = std::chrono::milliseconds{-1};
+  assert_config_error_contains(validate_config(config), "watermark_timeout");
 }
 
 void test_producer_config_validation() {
@@ -108,7 +117,30 @@ void test_invalid_construction_errors_are_explicit() {
   }
 }
 
+void test_seek_offset_validation_reports_unavailable_offsets() {
+  const BrokerWatermarkOffsets watermark{.low = 20, .high = 30};
+
+  assert(!validate_seek_offset(EngineInputTopic, 0, 20, watermark)
+              .has_value());
+  assert(!validate_seek_offset(EngineInputTopic, 0, 30, watermark)
+              .has_value());
+
+  const auto below_low =
+      validate_seek_offset(EngineInputTopic, 0, 19, watermark);
+  assert_config_error_contains(below_low, "below low watermark");
+  assert_config_error_contains(below_low, "checkpoint");
+
+  const auto above_high =
+      validate_seek_offset(EngineInputTopic, 0, 31, watermark);
+  assert_config_error_contains(above_high, "above high watermark");
+
+  const auto invalid = validate_seek_offset(
+      EngineInputTopic, 0, 20, BrokerWatermarkOffsets{.low = 30, .high = 20});
+  assert_config_error_contains(invalid, "invalid broker watermark");
+}
+
 void test_compile_link_to_librdkafka() {
+  static_assert(!std::is_abstract_v<RdKafkaEngineInputConsumer>);
   const std::string version = rdkafka_runtime_version();
   assert(!version.empty());
 }
@@ -122,6 +154,7 @@ int main() {
     test_producer_config_validation();
     test_committer_config_validation();
     test_invalid_construction_errors_are_explicit();
+    test_seek_offset_validation_reports_unavailable_offsets();
     test_compile_link_to_librdkafka();
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

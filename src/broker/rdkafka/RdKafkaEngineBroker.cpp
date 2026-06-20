@@ -90,6 +90,51 @@ using TopicPartitionPtr =
   return validate_properties(properties);
 }
 
+[[nodiscard]] std::string describe_partition(std::string_view topic,
+                                             std::int32_t partition) {
+  return std::string(topic) + "[" + std::to_string(partition) + "]";
+}
+
+[[nodiscard]] std::optional<std::string> validate_partition_request(
+    std::string_view topic,
+    std::int32_t partition) {
+  if (blank(topic)) {
+    return "topic must not be empty";
+  }
+  if (partition < 0) {
+    return "partition must not be negative";
+  }
+  return std::nullopt;
+}
+
+[[nodiscard]] std::optional<std::string> validate_seek_request(
+    std::string_view topic,
+    std::int32_t partition,
+    std::int64_t offset) {
+  if (auto error = validate_partition_request(topic, partition);
+      error.has_value()) {
+    return error;
+  }
+  if (offset < 0) {
+    return "offset must not be negative";
+  }
+  return std::nullopt;
+}
+
+[[nodiscard]] std::optional<std::string> validate_watermark_offsets(
+    std::string_view topic,
+    std::int32_t partition,
+    const BrokerWatermarkOffsets& watermark) {
+  if (watermark.low < 0 || watermark.high < 0 ||
+      watermark.low > watermark.high) {
+    return "invalid broker watermark for " +
+           describe_partition(topic, partition) + ": low=" +
+           std::to_string(watermark.low) + ", high=" +
+           std::to_string(watermark.high);
+  }
+  return std::nullopt;
+}
+
 [[nodiscard]] int to_timeout_ms(std::chrono::milliseconds timeout) {
   return static_cast<int>(timeout.count());
 }
@@ -255,7 +300,15 @@ std::optional<std::string> validate_config(
       return "topic names must not be empty";
     }
   }
-  return validate_timeout(config.poll_timeout, "poll_timeout");
+  if (auto error = validate_timeout(config.poll_timeout, "poll_timeout");
+      error.has_value()) {
+    return error;
+  }
+  if (auto error = validate_timeout(config.seek_timeout, "seek_timeout");
+      error.has_value()) {
+    return error;
+  }
+  return validate_timeout(config.watermark_timeout, "watermark_timeout");
 }
 
 std::optional<std::string> validate_config(
@@ -283,8 +336,14 @@ std::string rdkafka_runtime_version() {
 }
 
 struct RdKafkaEngineInputConsumer::Impl {
-  Impl(ConsumerPtr consumer, std::chrono::milliseconds poll_timeout)
-      : consumer(std::move(consumer)), poll_timeout(poll_timeout) {}
+  Impl(ConsumerPtr consumer,
+       std::chrono::milliseconds poll_timeout,
+       std::chrono::milliseconds seek_timeout,
+       std::chrono::milliseconds watermark_timeout)
+      : consumer(std::move(consumer)),
+        poll_timeout(poll_timeout),
+        seek_timeout(seek_timeout),
+        watermark_timeout(watermark_timeout) {}
 
   ~Impl() {
     if (consumer) {
@@ -294,6 +353,8 @@ struct RdKafkaEngineInputConsumer::Impl {
 
   ConsumerPtr consumer;
   std::chrono::milliseconds poll_timeout;
+  std::chrono::milliseconds seek_timeout;
+  std::chrono::milliseconds watermark_timeout;
 };
 
 RdKafkaEngineInputConsumer::RdKafkaEngineInputConsumer(
@@ -319,8 +380,9 @@ RdKafkaEngineInputConsumer::RdKafkaEngineInputConsumer(
                                    describe_error(subscribe_result));
   }
 
-  impl_ =
-      std::make_unique<Impl>(std::move(consumer), config.poll_timeout);
+  impl_ = std::make_unique<Impl>(std::move(consumer), config.poll_timeout,
+                                 config.seek_timeout,
+                                 config.watermark_timeout);
 }
 
 RdKafkaEngineInputConsumer::~RdKafkaEngineInputConsumer() = default;
@@ -358,6 +420,79 @@ std::optional<ConsumedRecord> RdKafkaEngineInputConsumer::poll() {
   }
 
   return record;
+}
+
+std::optional<std::string> RdKafkaEngineInputConsumer::seek(
+    const std::string& topic,
+    std::int32_t partition,
+    std::int64_t offset) {
+  if (auto error = validate_seek_request(topic, partition, offset);
+      error.has_value()) {
+    return error;
+  }
+
+  const BrokerWatermarkResult watermark = get_watermark(topic, partition);
+  if (!watermark.ok()) {
+    if (watermark.error.has_value()) {
+      return watermark.error;
+    }
+    return "rdkafka watermark query failed for " +
+           describe_partition(topic, partition);
+  }
+
+  if (auto error =
+          validate_seek_offset(topic, partition, offset, *watermark.offsets);
+      error.has_value()) {
+    return error;
+  }
+
+  TopicPartitionPtr target(
+      RdKafka::TopicPartition::create(topic, partition, offset));
+  if (!target) {
+    return "failed to create rdkafka topic partition for seek";
+  }
+
+  const RdKafka::ErrorCode seek_result =
+      impl_->consumer->seek(*target, to_timeout_ms(impl_->seek_timeout));
+  if (seek_result != RdKafka::ERR_NO_ERROR) {
+    return "rdkafka seek failed for " + describe_partition(topic, partition) +
+           " to offset " + std::to_string(offset) + ": " +
+           describe_error(seek_result);
+  }
+
+  return std::nullopt;
+}
+
+BrokerWatermarkResult RdKafkaEngineInputConsumer::get_watermark(
+    const std::string& topic,
+    std::int32_t partition) {
+  if (auto error = validate_partition_request(topic, partition);
+      error.has_value()) {
+    return BrokerWatermarkResult{.offsets = std::nullopt, .error = error};
+  }
+
+  std::int64_t low = 0;
+  std::int64_t high = 0;
+  const RdKafka::ErrorCode query_result =
+      impl_->consumer->query_watermark_offsets(
+          topic, partition, &low, &high,
+          to_timeout_ms(impl_->watermark_timeout));
+  if (query_result != RdKafka::ERR_NO_ERROR) {
+    return BrokerWatermarkResult{
+        .offsets = std::nullopt,
+        .error = "rdkafka watermark query failed for " +
+                 describe_partition(topic, partition) + ": " +
+                 describe_error(query_result),
+    };
+  }
+
+  BrokerWatermarkOffsets offsets{.low = low, .high = high};
+  if (auto error = validate_watermark_offsets(topic, partition, offsets);
+      error.has_value()) {
+    return BrokerWatermarkResult{.offsets = std::nullopt, .error = error};
+  }
+
+  return BrokerWatermarkResult{.offsets = offsets, .error = std::nullopt};
 }
 
 struct RdKafkaEngineRecordProducer::Impl {

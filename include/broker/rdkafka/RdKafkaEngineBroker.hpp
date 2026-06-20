@@ -19,6 +19,8 @@ struct RdKafkaConsumerConfig {
   std::string group_id{"engine"};
   std::vector<std::string> topics{EngineInputTopic};
   std::chrono::milliseconds poll_timeout{100};
+  std::chrono::milliseconds seek_timeout{5000};
+  std::chrono::milliseconds watermark_timeout{5000};
   std::string client_id{"engine-input-consumer"};
   std::vector<RdKafkaProperty> properties;
 };
@@ -76,6 +78,13 @@ class RdKafkaEngineInputConsumer final : public IEngineInputConsumer {
       delete;
 
   [[nodiscard]] std::optional<ConsumedRecord> poll() override;
+  [[nodiscard]] std::optional<std::string> seek(
+      const std::string& topic,
+      std::int32_t partition,
+      std::int64_t offset) override;
+  [[nodiscard]] BrokerWatermarkResult get_watermark(
+      const std::string& topic,
+      std::int32_t partition) override;
 
  private:
   struct Impl;

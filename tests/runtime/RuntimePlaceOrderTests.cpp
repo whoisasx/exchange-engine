@@ -112,6 +112,19 @@ const EngineOutputRecord* find_record(
   return nullptr;
 }
 
+void assert_book_has_order(const EngineRuntime& runtime, OrderId order_id) {
+  const auto* book = runtime.core().get_order_book(1);
+  assert(book != nullptr);
+  assert(book->has_order(order_id));
+}
+
+void assert_book_does_not_have_order(const EngineRuntime& runtime,
+                                     OrderId order_id) {
+  const auto* book = runtime.core().get_order_book(1);
+  assert(book != nullptr);
+  assert(!book->has_order(order_id));
+}
+
 protocol::ProtocolMessage parse_serialized_output_json(
     const EngineOutputRecord& record,
     const std::string& serialized) {
@@ -436,6 +449,88 @@ void test_runtime_cancel_order() {
   assert(runtime.metadata_store().empty());
 }
 
+void test_replay_silent_resting_order_updates_state_without_outputs() {
+  auto runtime = make_runtime();
+  const auto raw = read_file(
+      std::filesystem::path(PROTOCOL_EXAMPLES_DIR) /
+      "engine-place-order.command.json");
+
+  const auto result = runtime.process(make_record(raw, 1501),
+                                      ProcessingMode::ReplaySilent);
+  assert(result.status == EngineProcessStatus::Processed);
+  assert(result.duplicate == std::nullopt);
+  assert(result.empty());
+  assert(runtime.metadata_store().find(9001) != nullptr);
+  assert_book_has_order(runtime, 9001);
+  assert(runtime.market_sequences().peek(1) == 3);
+
+  const auto snapshot = runtime.snapshot_state();
+  assert(snapshot.public_sequences.at(1) == 3);
+  assert(snapshot.processed_input_ids.contains("input_place_001"));
+  assert(snapshot.processed_idempotency_keys.contains("client-order-001"));
+
+  auto restored = make_runtime();
+  restored.restore_state(snapshot);
+  const auto duplicate = restored.process_replay(make_record(raw, 1502));
+  assert_duplicate_result(duplicate,
+                          EngineDuplicateReason::InputId,
+                          "input_place_001",
+                          1501,
+                          "input_place_001");
+  assert(restored.market_sequences().peek(1) == 3);
+  assert_book_has_order(restored, 9001);
+}
+
+void test_replay_silent_crossing_order_updates_state_without_outputs() {
+  auto runtime = make_runtime();
+  const auto resting = read_file(
+      std::filesystem::path(PROTOCOL_EXAMPLES_DIR) /
+      "engine-place-order.command.json");
+  (void)runtime.process_replay(make_record(resting, 1511));
+  assert(runtime.metadata_store().find(9001) != nullptr);
+  assert_book_has_order(runtime, 9001);
+
+  const auto result = runtime.process_replay(
+      make_record(crossing_order_json(), 1512));
+  assert(result.status == EngineProcessStatus::Processed);
+  assert(result.duplicate == std::nullopt);
+  assert(result.empty());
+  assert(runtime.metadata_store().empty());
+  assert_book_does_not_have_order(runtime, 9001);
+  assert_book_does_not_have_order(runtime, 9002);
+  assert(runtime.market_sequences().peek(1) == 5);
+}
+
+void test_live_sequence_continues_after_replayed_events() {
+  auto runtime = make_runtime();
+  const auto replayed = read_file(
+      std::filesystem::path(PROTOCOL_EXAMPLES_DIR) /
+      "engine-place-order.command.json");
+  const auto silent = runtime.process_replay(make_record(replayed, 1521));
+  assert(silent.empty());
+  assert(runtime.market_sequences().peek(1) == 3);
+
+  const auto live = place_order_json("input_after_replay_001",
+                                     "req_after_replay_001",
+                                     "idem-after-replay-001",
+                                     9301,
+                                     "res_after_replay_001");
+  const auto result = runtime.process(make_record(live, 1522));
+  assert(result.status == EngineProcessStatus::Processed);
+  assert(result.replies.size() == 1);
+  assert(result.events.size() == 2);
+
+  const auto* opened = find_record(result.events, "OrderOpened");
+  assert(opened != nullptr);
+  assert(opened->payload.at("engine_sequence") == "3");
+
+  const auto* delta = find_record(result.events, "OrderBookDelta");
+  assert(delta != nullptr);
+  assert(delta->payload.at("engine_sequence") == "4");
+  assert(delta->payload.at("quantity") == "20");
+  assert(runtime.market_sequences().peek(1) == 5);
+}
+
 void test_place_order_duplicate_input_id_is_silent() {
   auto runtime = make_runtime();
   const auto place = place_order_json("input_dedupe_place_001",
@@ -667,6 +762,9 @@ int main() {
     test_runtime_resting_limit_order();
     test_runtime_crossing_order_emits_trade();
     test_runtime_cancel_order();
+    test_replay_silent_resting_order_updates_state_without_outputs();
+    test_replay_silent_crossing_order_updates_state_without_outputs();
+    test_live_sequence_continues_after_replayed_events();
     test_place_order_duplicate_input_id_is_silent();
     test_place_order_duplicate_idempotency_is_silent();
     test_same_order_id_different_idempotency_reaches_core();

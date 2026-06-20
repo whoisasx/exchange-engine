@@ -142,6 +142,25 @@ target_link_libraries(engine_broker
     cex::engine_runtime
 )
 
+add_library(engine_recovery
+  src/recovery/RecoveryCoordinator.cpp
+)
+add_library(cex::engine_recovery ALIAS engine_recovery)
+
+target_compile_features(engine_recovery PUBLIC cxx_std_20)
+
+target_include_directories(engine_recovery
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+
+target_link_libraries(engine_recovery
+  PUBLIC
+    cex::engine_broker
+    cex::engine_checkpoint
+)
+
 add_library(engine_app_config
   src/apps/engine/EngineAppConfig.cpp
 )
@@ -357,6 +376,17 @@ if(BUILD_TESTING)
   )
 
   add_test(NAME broker_tests COMMAND broker_tests)
+
+  add_executable(recovery_tests
+    tests/recovery/RecoveryCoordinatorTests.cpp
+  )
+
+  target_link_libraries(recovery_tests
+    PRIVATE
+      cex::engine_recovery
+  )
+
+  add_test(NAME recovery_tests COMMAND recovery_tests)
 
   if(TARGET cex::engine_broker_rdkafka)
     add_executable(rdkafka_broker_tests

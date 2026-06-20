@@ -39,6 +39,11 @@ enum class EngineProcessStatus {
   Duplicate,
 };
 
+enum class ProcessingMode {
+  Live,
+  ReplaySilent,
+};
+
 enum class EngineDuplicateReason {
   None,
   InputId,

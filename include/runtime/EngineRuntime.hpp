@@ -37,7 +37,11 @@ class EngineRuntime {
 
   void add_symbol(const SymbolConfig& symbol_config);
 
-  [[nodiscard]] EngineProcessResult process(const InboundEngineRecord& record);
+  [[nodiscard]] EngineProcessResult process(
+      const InboundEngineRecord& record,
+      ProcessingMode mode = ProcessingMode::Live);
+  [[nodiscard]] EngineProcessResult process_replay(
+      const InboundEngineRecord& record);
 
   [[nodiscard]] const EngineCore& core() const noexcept;
   [[nodiscard]] const cex::adapter::OrderMetadataStore& metadata_store()

@@ -1,10 +1,13 @@
 #include "broker/RedpandaEngineApp.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -20,6 +23,12 @@ using namespace cex::broker;
 
 namespace {
 
+struct FakeSeekRequest {
+  std::string topic;
+  std::int32_t partition{0};
+  std::int64_t offset{0};
+};
+
 class FakeConsumer final : public IEngineInputConsumer {
  public:
   explicit FakeConsumer(std::vector<ConsumedRecord> records)
@@ -31,6 +40,70 @@ class FakeConsumer final : public IEngineInputConsumer {
     }
     return records_[next_++];
   }
+
+  std::optional<std::string> seek(const std::string& topic,
+                                  std::int32_t partition,
+                                  std::int64_t offset) override {
+    seeks.push_back(FakeSeekRequest{
+        .topic = topic,
+        .partition = partition,
+        .offset = offset,
+    });
+    if (seek_error.has_value()) {
+      std::optional<std::string> error = std::move(seek_error);
+      seek_error.reset();
+      return error;
+    }
+
+    BrokerWatermarkResult result = get_watermark(topic, partition);
+    if (!result.ok()) {
+      if (result.error.has_value()) {
+        return result.error;
+      }
+      return "broker watermark unavailable";
+    }
+    if (auto error =
+            validate_seek_offset(topic, partition, offset, *result.offsets);
+        error.has_value()) {
+      return error;
+    }
+
+    const auto next =
+        std::find_if(records_.begin(), records_.end(),
+                     [&](const ConsumedRecord& record) {
+                       return record.topic == topic &&
+                              record.partition == partition &&
+                              record.offset >= offset;
+                     });
+    next_ = static_cast<std::size_t>(
+        std::distance(records_.begin(), next));
+    return std::nullopt;
+  }
+
+  BrokerWatermarkResult get_watermark(
+      const std::string& topic,
+      std::int32_t partition) override {
+    if (watermark_error.has_value()) {
+      return BrokerWatermarkResult{.offsets = std::nullopt,
+                                   .error = watermark_error};
+    }
+    if (!watermark.has_value()) {
+      return BrokerWatermarkResult{
+          .offsets = std::nullopt,
+          .error = "watermark unavailable for " + topic + "[" +
+                   std::to_string(partition) + "]",
+      };
+    }
+    return BrokerWatermarkResult{.offsets = watermark,
+                                 .error = std::nullopt};
+  }
+
+  std::vector<FakeSeekRequest> seeks;
+  std::optional<std::string> seek_error;
+  std::optional<BrokerWatermarkOffsets> watermark{
+      BrokerWatermarkOffsets{.low = 0,
+                             .high = std::numeric_limits<std::int64_t>::max()}};
+  std::optional<std::string> watermark_error;
 
  private:
   std::vector<ConsumedRecord> records_;
@@ -70,6 +143,10 @@ class FakeCommitter final : public IEngineOffsetCommitter {
   std::vector<OffsetCommitRequest> commits;
   std::optional<std::string> fail_next;
 };
+
+void assert_contains(const std::string& value, const std::string& token) {
+  assert(value.find(token) != std::string::npos);
+}
 
 std::string read_file(const std::filesystem::path& path) {
   std::ifstream input(path);
@@ -133,6 +210,51 @@ void assert_committed_source_offset(const FakeCommitter& committer,
   assert(committer.commits[0].topic == EngineInputTopic);
   assert(committer.commits[0].partition == 0);
   assert(committer.commits[0].offset == offset);
+}
+
+void test_seek_uses_watermark_and_repositions_consumer() {
+  FakeConsumer consumer(
+      {make_input_record(10, "first"), make_input_record(11, "second")});
+  consumer.watermark = BrokerWatermarkOffsets{.low = 10, .high = 12};
+
+  const BrokerWatermarkResult watermark =
+      consumer.get_watermark(EngineInputTopic, 0);
+  assert(watermark.ok());
+  assert(watermark.offsets->low == 10);
+  assert(watermark.offsets->high == 12);
+
+  const auto error = consumer.seek(EngineInputTopic, 0, 11);
+
+  assert(!error.has_value());
+  assert(consumer.seeks.size() == 1);
+  assert(consumer.seeks[0].topic == EngineInputTopic);
+  assert(consumer.seeks[0].partition == 0);
+  assert(consumer.seeks[0].offset == 11);
+  const auto record = consumer.poll();
+  assert(record.has_value());
+  assert(record->offset == 11);
+  assert(record->value == "second");
+}
+
+void test_seek_below_low_watermark_fails_loudly() {
+  FakeConsumer consumer({make_input_record(10, "first")});
+  consumer.watermark = BrokerWatermarkOffsets{.low = 10, .high = 11};
+
+  const auto error = consumer.seek(EngineInputTopic, 0, 9);
+
+  assert(error.has_value());
+  assert_contains(*error, "below low watermark");
+  assert_contains(*error, "checkpoint");
+}
+
+void test_seek_to_high_watermark_is_valid_end_position() {
+  FakeConsumer consumer({make_input_record(10, "first")});
+  consumer.watermark = BrokerWatermarkOffsets{.low = 10, .high = 11};
+
+  const auto error = consumer.seek(EngineInputTopic, 0, 11);
+
+  assert(!error.has_value());
+  assert(!consumer.poll().has_value());
 }
 
 void test_successful_place_order_publishes_then_commits() {
@@ -235,6 +357,9 @@ void test_wrong_input_topic_is_rejected_without_commit() {
 
 int main() {
   try {
+    test_seek_uses_watermark_and_repositions_consumer();
+    test_seek_below_low_watermark_fails_loudly();
+    test_seek_to_high_watermark_is_valid_end_position();
     test_successful_place_order_publishes_then_commits();
     test_publish_failure_does_not_commit();
     test_duplicate_no_output_result_commits_without_publishes();
