@@ -304,6 +304,22 @@ if(BUILD_TESTING)
 
   add_test(NAME runtime_tests COMMAND runtime_tests)
 
+  add_executable(engine_smoke
+    tests/smoke/EngineSmoke.cpp
+  )
+
+  target_link_libraries(engine_smoke
+    PRIVATE
+      cex::engine_runtime
+  )
+
+  target_compile_definitions(engine_smoke
+    PRIVATE
+      PROTOCOL_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/docs/examples"
+  )
+
+  add_test(NAME engine_smoke COMMAND engine_smoke)
+
   add_executable(checkpoint_tests
     tests/checkpoint/CheckpointTests.cpp
   )

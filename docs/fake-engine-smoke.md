@@ -1,6 +1,46 @@
 # Fake Engine Smoke Harness
 
-`apps/fake-engine` is a development-only contract smoke stand-in for the engine. It is not a production matching, margin, funding, or liquidation engine. It exists to exercise the flattened stream contract docs and downstream consumers before the external C++ engine is available.
+## Current C++ engine smoke
+
+This C++ repo now has a local, deterministic engine smoke that does not require
+Redpanda, wallet, projector, websocket, or any other external service:
+
+```sh
+scripts/engine-smoke.sh
+```
+
+The script configures and builds the repo with CMake, then runs the
+`engine_smoke` CTest target. The smoke drives `EngineRuntime` and `EngineOutbox`
+with an in-process publisher, using `docs/examples/engine-place-order.command.json`
+for the resting order, a crossing order fixture generated in the test, duplicate
+handling, and a cancel flow. It asserts replies/events are serialized to
+parseable JSON and verifies public `TradeExecuted` / `OrderBookDelta`
+`engine_sequence` behavior.
+
+Redpanda is optional for this local smoke. If `rpk` is installed, the script
+prints the local `engine.input` provisioning commands. To run those commands
+against an available local Redpanda cluster:
+
+```sh
+scripts/engine-smoke.sh --provision-redpanda
+```
+
+The provisioning keeps `engine.input` explicit as a single-partition topic with
+`retention.ms=1800000`:
+
+```sh
+rpk topic create --if-not-exists --partitions 1 -c retention.ms=1800000 engine.input
+rpk topic alter-config engine.input --set retention.ms=1800000
+```
+
+## Broader service smoke
+
+`apps/fake-engine` is a development-only contract smoke stand-in for the engine
+in the broader service workspace. It is not a production matching, margin,
+funding, or liquidation engine. It exists to exercise the flattened stream
+contract docs and downstream consumers. Those wallet, projector, websocket,
+server, and fake-engine services are not part of this C++ repo yet, so this
+end-to-end service smoke remains future/integration scope here.
 
 Run the automated smoke:
 
@@ -10,7 +50,9 @@ scripts/e2e-smoke.sh
 
 The script starts local Postgres and Redpanda with Docker Compose, creates the stream topics, starts `wallet`, `projector`, `timeseries`, `orderbook-archiver`, `ledger`, `fake-engine`, `ws`, and `server`, then drives the REST and websocket flow with `apps/e2e-smoke`.
 
-The smoke script provisions `engine.input` explicitly as a single-partition topic with `retention.ms=1800000`. For manual local setup, apply the same setting before starting services:
+The broader smoke script provisions `engine.input` explicitly as a
+single-partition topic with `retention.ms=1800000`. For manual local setup,
+apply the same setting before starting services:
 
 ```sh
 rpk topic create --if-not-exists --partitions 1 -c retention.ms=1800000 engine.input
