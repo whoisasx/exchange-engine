@@ -119,6 +119,61 @@ void append_json_string(std::ostream& output, std::string_view value) {
   return true;
 }
 
+[[nodiscard]] bool consume_digits(std::string_view value,
+                                  std::size_t& offset) {
+  const std::size_t begin = offset;
+  while (offset < value.size() && value[offset] >= '0' &&
+         value[offset] <= '9') {
+    ++offset;
+  }
+  return offset > begin;
+}
+
+[[nodiscard]] bool is_json_number(std::string_view value) {
+  if (value.empty()) {
+    return false;
+  }
+
+  std::size_t offset = 0;
+  if (value[offset] == '-') {
+    ++offset;
+    if (offset == value.size()) {
+      return false;
+    }
+  }
+
+  if (value[offset] == '0') {
+    ++offset;
+  } else if (value[offset] >= '1' && value[offset] <= '9') {
+    if (!consume_digits(value, offset)) {
+      return false;
+    }
+  } else {
+    return false;
+  }
+
+  if (offset < value.size() && value[offset] == '.') {
+    ++offset;
+    if (!consume_digits(value, offset)) {
+      return false;
+    }
+  }
+
+  if (offset < value.size() &&
+      (value[offset] == 'e' || value[offset] == 'E')) {
+    ++offset;
+    if (offset < value.size() &&
+        (value[offset] == '+' || value[offset] == '-')) {
+      ++offset;
+    }
+    if (!consume_digits(value, offset)) {
+      return false;
+    }
+  }
+
+  return offset == value.size();
+}
+
 void append_payload_value(std::ostream& output,
                           std::string_view field,
                           std::string_view value) {
@@ -127,6 +182,73 @@ void append_payload_value(std::ostream& output,
     return;
   }
   append_json_string(output, value);
+}
+
+void append_payload_value(std::ostream& output,
+                          std::string_view field,
+                          const PayloadValue& value);
+
+void append_payload_array(std::ostream& output,
+                          const PayloadValue::Array& values) {
+  output << '[';
+  bool first = true;
+  for (const auto& value : values) {
+    if (!first) {
+      output << ',';
+    }
+    first = false;
+    append_payload_value(output, {}, value);
+  }
+  output << ']';
+}
+
+void append_payload_object(std::ostream& output,
+                           const PayloadValue::Object& fields) {
+  output << '{';
+  bool first = true;
+  for (const auto& [field, value] : fields) {
+    if (!first) {
+      output << ',';
+    }
+    first = false;
+    append_json_string(output, field);
+    output << ':';
+    append_payload_value(output, field, value);
+  }
+  output << '}';
+}
+
+void append_payload_value(std::ostream& output,
+                          std::string_view field,
+                          const PayloadValue& value) {
+  if (value.is_null()) {
+    output << "null";
+    return;
+  }
+  if (const auto* boolean = value.as_bool(); boolean != nullptr) {
+    output << (*boolean ? "true" : "false");
+    return;
+  }
+  if (const auto* number = value.as_number(); number != nullptr) {
+    if (is_json_number(number->text)) {
+      output << number->text;
+      return;
+    }
+    append_json_string(output, number->text);
+    return;
+  }
+  if (const auto* text = value.as_string(); text != nullptr) {
+    append_payload_value(output, field, std::string_view(*text));
+    return;
+  }
+  if (const auto* array = value.as_array(); array != nullptr) {
+    append_payload_array(output, *array);
+    return;
+  }
+  if (const auto* object = value.as_object(); object != nullptr) {
+    append_payload_object(output, *object);
+    return;
+  }
 }
 
 }  // namespace

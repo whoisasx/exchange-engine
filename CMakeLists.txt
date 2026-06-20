@@ -323,6 +323,18 @@ if(BUILD_TESTING)
 
   add_test(NAME runtime_tests COMMAND runtime_tests)
 
+  add_executable(engine_output_serializer_tests
+    tests/runtime/EngineOutputSerializerTests.cpp
+  )
+
+  target_link_libraries(engine_output_serializer_tests
+    PRIVATE
+      cex::engine_runtime
+  )
+
+  add_test(NAME engine_output_serializer_tests
+           COMMAND engine_output_serializer_tests)
+
   add_executable(engine_smoke
     tests/smoke/EngineSmoke.cpp
   )

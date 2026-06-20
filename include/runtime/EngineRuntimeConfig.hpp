@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "core/SymbolConfig.hpp"
+#include "runtime/EnginePayloadValue.hpp"
 
 namespace cex::runtime {
 
@@ -15,7 +16,7 @@ inline constexpr const char* EngineInputTopic = "engine.input";
 inline constexpr const char* EngineRepliesTopic = "engine.replies";
 inline constexpr const char* EngineEventsTopic = "engine.events";
 
-using PayloadFields = std::unordered_map<std::string, std::string>;
+using PayloadFields = std::unordered_map<std::string, PayloadValue>;
 using EngineRuntimeClock = std::function<std::int64_t()>;
 
 struct InboundEngineRecord {
