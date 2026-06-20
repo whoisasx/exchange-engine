@@ -106,6 +106,7 @@ target_link_libraries(engine_runtime
 
 add_library(engine_checkpoint
   src/checkpoint/EngineCheckpointManager.cpp
+  src/checkpoint/file/FileCheckpointStore.cpp
   src/checkpoint/InMemoryCheckpointStore.cpp
 )
 add_library(cex::engine_checkpoint ALIAS engine_checkpoint)
@@ -140,6 +141,86 @@ target_link_libraries(engine_broker
   PUBLIC
     cex::engine_runtime
 )
+
+set(ENGINE_RDKAFKA_ROOT_HINTS)
+if(DEFINED ENV{HOMEBREW_PREFIX})
+  list(APPEND ENGINE_RDKAFKA_ROOT_HINTS "$ENV{HOMEBREW_PREFIX}/opt/librdkafka")
+endif()
+list(APPEND ENGINE_RDKAFKA_ROOT_HINTS
+  /opt/homebrew/opt/librdkafka
+  /usr/local/opt/librdkafka
+)
+
+find_path(ENGINE_RDKAFKA_INCLUDE_DIR
+  NAMES librdkafka/rdkafkacpp.h
+  HINTS ${ENGINE_RDKAFKA_ROOT_HINTS}
+  PATH_SUFFIXES include
+)
+
+find_library(ENGINE_RDKAFKA_CPP_LIBRARY
+  NAMES rdkafka++
+  HINTS ${ENGINE_RDKAFKA_ROOT_HINTS}
+  PATH_SUFFIXES lib
+)
+
+find_library(ENGINE_RDKAFKA_LIBRARY
+  NAMES rdkafka
+  HINTS ${ENGINE_RDKAFKA_ROOT_HINTS}
+  PATH_SUFFIXES lib
+)
+
+set(ENGINE_RDKAFKA_FOUND FALSE)
+if(ENGINE_RDKAFKA_INCLUDE_DIR
+    AND ENGINE_RDKAFKA_CPP_LIBRARY
+    AND ENGINE_RDKAFKA_LIBRARY)
+  set(ENGINE_RDKAFKA_FOUND TRUE)
+endif()
+
+option(ENGINE_ENABLE_RDKAFKA
+  "Build the concrete librdkafka-backed broker implementation"
+  ${ENGINE_RDKAFKA_FOUND}
+)
+
+if(ENGINE_ENABLE_RDKAFKA AND ENGINE_RDKAFKA_FOUND)
+  add_library(RdKafka::rdkafka UNKNOWN IMPORTED)
+  set_target_properties(RdKafka::rdkafka PROPERTIES
+    IMPORTED_LOCATION "${ENGINE_RDKAFKA_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "${ENGINE_RDKAFKA_INCLUDE_DIR}"
+  )
+
+  add_library(RdKafka::rdkafka_cpp UNKNOWN IMPORTED)
+  set_target_properties(RdKafka::rdkafka_cpp PROPERTIES
+    IMPORTED_LOCATION "${ENGINE_RDKAFKA_CPP_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "${ENGINE_RDKAFKA_INCLUDE_DIR}"
+    INTERFACE_LINK_LIBRARIES RdKafka::rdkafka
+  )
+
+  add_library(engine_broker_rdkafka
+    src/broker/rdkafka/RdKafkaEngineBroker.cpp
+  )
+  add_library(cex::engine_broker_rdkafka ALIAS engine_broker_rdkafka)
+
+  target_compile_features(engine_broker_rdkafka PUBLIC cxx_std_20)
+
+  target_include_directories(engine_broker_rdkafka
+    PUBLIC
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+      $<INSTALL_INTERFACE:include>
+  )
+
+  target_link_libraries(engine_broker_rdkafka
+    PUBLIC
+      cex::engine_broker
+    PRIVATE
+      RdKafka::rdkafka_cpp
+  )
+
+  message(STATUS "Building engine_broker_rdkafka with ${ENGINE_RDKAFKA_CPP_LIBRARY}")
+elseif(NOT ENGINE_RDKAFKA_FOUND)
+  message(STATUS "librdkafka++ not found; skipping engine_broker_rdkafka target/tests")
+else()
+  message(STATUS "ENGINE_ENABLE_RDKAFKA is OFF; skipping engine_broker_rdkafka target/tests")
+endif()
 
 include(CTest)
 
@@ -201,6 +282,17 @@ if(BUILD_TESTING)
 
   add_test(NAME checkpoint_tests COMMAND checkpoint_tests)
 
+  add_executable(checkpoint_file_tests
+    tests/checkpoint/file/FileCheckpointStoreTests.cpp
+  )
+
+  target_link_libraries(checkpoint_file_tests
+    PRIVATE
+      cex::engine_checkpoint
+  )
+
+  add_test(NAME checkpoint_file_tests COMMAND checkpoint_file_tests)
+
   add_executable(broker_tests
     tests/broker/RedpandaEngineAppTests.cpp
   )
@@ -216,6 +308,19 @@ if(BUILD_TESTING)
   )
 
   add_test(NAME broker_tests COMMAND broker_tests)
+
+  if(TARGET cex::engine_broker_rdkafka)
+    add_executable(rdkafka_broker_tests
+      tests/broker/rdkafka/RdKafkaBackendTests.cpp
+    )
+
+    target_link_libraries(rdkafka_broker_tests
+      PRIVATE
+        cex::engine_broker_rdkafka
+    )
+
+    add_test(NAME rdkafka_broker_tests COMMAND rdkafka_broker_tests)
+  endif()
 
   add_executable(service_contract_tests
     tests/services/ServiceContractsTest.cpp
