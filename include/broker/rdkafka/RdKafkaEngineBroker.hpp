@@ -68,7 +68,8 @@ class RdKafkaOperationError final : public RdKafkaError {
 
 [[nodiscard]] std::string rdkafka_runtime_version();
 
-class RdKafkaEngineInputConsumer final : public IEngineInputConsumer {
+class RdKafkaEngineInputConsumer final : public IEngineInputConsumer,
+                                         public IEngineOffsetCommitter {
  public:
   explicit RdKafkaEngineInputConsumer(const RdKafkaConsumerConfig& config);
   ~RdKafkaEngineInputConsumer() override;
@@ -85,6 +86,8 @@ class RdKafkaEngineInputConsumer final : public IEngineInputConsumer {
   [[nodiscard]] BrokerWatermarkResult get_watermark(
       const std::string& topic,
       std::int32_t partition) override;
+  [[nodiscard]] std::optional<std::string> commit(
+      const OffsetCommitRequest& request) override;
 
  private:
   struct Impl;

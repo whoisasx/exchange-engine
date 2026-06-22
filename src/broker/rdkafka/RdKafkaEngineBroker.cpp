@@ -452,12 +452,19 @@ std::optional<std::string> RdKafkaEngineInputConsumer::seek(
     return "failed to create rdkafka topic partition for seek";
   }
 
-  const RdKafka::ErrorCode seek_result =
-      impl_->consumer->seek(*target, to_timeout_ms(impl_->seek_timeout));
-  if (seek_result != RdKafka::ERR_NO_ERROR) {
-    return "rdkafka seek failed for " + describe_partition(topic, partition) +
-           " to offset " + std::to_string(offset) + ": " +
-           describe_error(seek_result);
+  const RdKafka::ErrorCode unsubscribe_result = impl_->consumer->unsubscribe();
+  if (unsubscribe_result != RdKafka::ERR_NO_ERROR) {
+    return "rdkafka unsubscribe failed before seek for " +
+           describe_partition(topic, partition) + ": " +
+           describe_error(unsubscribe_result);
+  }
+
+  std::vector<RdKafka::TopicPartition*> assignment{target.get()};
+  const RdKafka::ErrorCode assign_result = impl_->consumer->assign(assignment);
+  if (assign_result != RdKafka::ERR_NO_ERROR) {
+    return "rdkafka assign failed for " + describe_partition(topic, partition) +
+           " at offset " + std::to_string(offset) + ": " +
+           describe_error(assign_result);
   }
 
   return std::nullopt;
@@ -493,6 +500,34 @@ BrokerWatermarkResult RdKafkaEngineInputConsumer::get_watermark(
   }
 
   return BrokerWatermarkResult{.offsets = offsets, .error = std::nullopt};
+}
+
+std::optional<std::string> RdKafkaEngineInputConsumer::commit(
+    const OffsetCommitRequest& request) {
+  if (auto error = validate_commit_request(request); error.has_value()) {
+    return error;
+  }
+
+  const std::int64_t kafka_resume_offset = request.offset + 1;
+  TopicPartitionPtr partition(RdKafka::TopicPartition::create(
+      request.topic, request.partition, kafka_resume_offset));
+  if (!partition) {
+    return "failed to create rdkafka topic partition for commit";
+  }
+
+  std::vector<RdKafka::TopicPartition*> offsets{partition.get()};
+  const RdKafka::ErrorCode commit_result = impl_->consumer->commitSync(offsets);
+  if (commit_result != RdKafka::ERR_NO_ERROR) {
+    return "rdkafka offset commit failed: " + describe_error(commit_result);
+  }
+
+  if (partition->err() != RdKafka::ERR_NO_ERROR) {
+    return "rdkafka offset commit failed for " + request.topic + "[" +
+           std::to_string(request.partition) + "]: " +
+           describe_error(partition->err());
+  }
+
+  return std::nullopt;
 }
 
 struct RdKafkaEngineRecordProducer::Impl {

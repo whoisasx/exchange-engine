@@ -237,11 +237,6 @@ int main(int argc, char* argv[]) {
         .bootstrap_servers = config.bootstrap_servers,
         .client_id = "engine-app-record-producer",
     };
-    cex::broker::RdKafkaOffsetCommitterConfig committer_config{
-        .bootstrap_servers = config.bootstrap_servers,
-        .group_id = config.consumer_group_id,
-        .client_id = "engine-app-offset-committer",
-    };
 
     cex::broker::RdKafkaEngineInputConsumer consumer(consumer_config);
     cex::recovery::RecoveryCoordinator recovery_coordinator(
@@ -251,11 +246,10 @@ int main(int argc, char* argv[]) {
     fail_if_recovery_incomplete(recovery_result);
 
     cex::broker::RdKafkaEngineRecordProducer producer(producer_config);
-    cex::broker::RdKafkaOffsetCommitter committer(committer_config);
     cex::broker::RedpandaEngineApp app(
         consumer,
         producer,
-        committer,
+        consumer,
         runtime,
         [&](const cex::broker::ConsumedRecord& source,
             const cex::runtime::EngineRuntime& checkpoint_runtime) {

@@ -137,7 +137,7 @@ consume_recent_topic() {
   local topic="$1"
   local count="$2"
   log "attempting bounded consume from $topic (last $count records, if any)"
-  if ! rpk topic consume "$topic" --offset "-${count}:end" --num "$count" \
+  if ! rpk topic consume "$topic" --offset "@-5m:end" --num "$count" \
     --format json; then
     warn "could not consume recent records from $topic"
   fi
