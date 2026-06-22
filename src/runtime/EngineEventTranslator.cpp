@@ -356,6 +356,9 @@ void apply_position_fill(IsolatedPositionState& position,
 
 [[nodiscard]] const char* fill_reason_text(
     const EngineEventTranslationContext& context) {
+  if (context.adl_execution) {
+    return "ADL";
+  }
   return context.command_kind == RuntimeCommandKind::LiquidatePosition
              ? "LIQUIDATION"
              : "TRADE";
@@ -577,6 +580,12 @@ void append_order_rejected(EngineProcessResult& result,
          200;
 }
 
+[[nodiscard]] std::int64_t liquidation_fee_for_context(
+    const TradeExecuted& trade,
+    const EngineEventTranslationContext& context) {
+  return context.adl_execution ? 0 : liquidation_fee_for(trade);
+}
+
 [[nodiscard]] PayloadValue::Array liquidation_fee_deltas(
     const TradeExecuted& trade,
     const cex::adapter::OrderMetadata* taker,
@@ -585,7 +594,8 @@ void append_order_rejected(EngineProcessResult& result,
       PayloadValue::object(PayloadValue::Object{
           {"user_id", number_value(context.liquidated_user_id)},
           {"asset", settlement_asset_for(taker)},
-          {"amount", number_value(-liquidation_fee_for(trade))},
+          {"amount", number_value(-liquidation_fee_for_context(trade,
+                                                                context))},
           {"reason", "LIQUIDATION_FEE"},
       })};
 }
@@ -619,6 +629,27 @@ void append_order_rejected(EngineProcessResult& result,
     const cex::adapter::OrderMetadata* taker,
     cex::adapter::MarketSequenceGenerator& market_sequences,
     const EngineRuntimeClock& clock) {
+  if (context.adl_execution) {
+    PayloadFields payload{
+        {"adl_id", context.adl_id},
+        {"liquidation_id", context.liquidation_id},
+        {"liquidated_user_id", number_value(context.liquidated_user_id)},
+        {"deleveraged_user_id",
+         number_value(context.adl_counterparty_user_id)},
+        {"position_side", adapter_side_text(context.liquidation_position_side)},
+        {"quantity", number_value(trade.quantity.lots())},
+        {"price", number_value(trade.price.ticks())},
+        {"rank", number_value(context.adl_priority_rank)},
+        {"reason", "INSURANCE_FUND_INSUFFICIENT"},
+    };
+    return make_event("AdlExecuted",
+                      static_cast<cex::adapter::MarketId>(trade.symbolId),
+                      context,
+                      market_sequences,
+                      clock,
+                      std::move(payload));
+  }
+
   PayloadFields payload{
       {"liquidation_id", context.liquidation_id},
       {"fill_id", number_value(trade.tradeId)},
@@ -629,9 +660,11 @@ void append_order_rejected(EngineProcessResult& result,
       {"liquidated_user_id", number_value(context.liquidated_user_id)},
       {"user_id", number_value(context.liquidated_user_id)},
       {"position_side", adapter_side_text(context.liquidation_position_side)},
-      {"liquidation_fee", number_value(liquidation_fee_for(trade))},
+      {"liquidation_fee", number_value(liquidation_fee_for_context(trade,
+                                                                    context))},
       {"fee_asset", settlement_asset_for(taker)},
   };
+
   return make_event("LiquidationExecuted",
                     static_cast<cex::adapter::MarketId>(trade.symbolId),
                     context,
@@ -655,6 +688,7 @@ void append_trade_executed(
   const auto* taker = find_metadata(trade.takerOrderId, context, metadata_store);
   const bool is_liquidation =
       context.command_kind == RuntimeCommandKind::LiquidatePosition;
+  const bool is_adl = context.adl_execution;
 
   PayloadFields payload{
       {"trade_id", text(trade.tradeId)},
@@ -665,11 +699,11 @@ void append_trade_executed(
       {"taker_order_id", text(trade.takerOrderId)},
       {"execution_reason", is_liquidation ? "LIQUIDATION" : "TRADE"},
       {"fee_deltas",
-       PayloadValue::array(is_liquidation
+       PayloadValue::array(is_liquidation && !is_adl
                                ? liquidation_fee_deltas(trade, taker, context)
                                : PayloadValue::Array{})},
       {"settlements",
-       PayloadValue::array(is_liquidation
+       PayloadValue::array(is_liquidation && !is_adl
                                ? liquidation_settlements(trade, maker)
                                : PayloadValue::Array{})},
   };
@@ -686,7 +720,15 @@ void append_trade_executed(
     payload.emplace("liquidated_user_id", number_value(context.liquidated_user_id));
     payload.emplace("position_side",
                     adapter_side_text(context.liquidation_position_side));
-    payload.emplace("liquidation_fee", number_value(liquidation_fee_for(trade)));
+    payload.emplace("liquidation_fee",
+                    number_value(liquidation_fee_for_context(trade, context)));
+  }
+  if (is_adl) {
+    payload.emplace("adl_id", context.adl_id);
+    payload.emplace("counterparty_user_id",
+                    number_value(context.adl_counterparty_user_id));
+    payload.emplace("adl_priority_rank",
+                    number_value(context.adl_priority_rank));
   }
 
   result.events.push_back(

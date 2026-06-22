@@ -36,6 +36,10 @@ struct EngineEventTranslationContext {
   cex::adapter::AdapterUserId liquidated_user_id{0};
   cex::adapter::AdapterSide liquidation_position_side{
       cex::adapter::AdapterSide::Long};
+  bool adl_execution{false};
+  std::string adl_id;
+  cex::adapter::AdapterUserId adl_counterparty_user_id{0};
+  std::int64_t adl_priority_rank{0};
 };
 
 struct PositionRiskKey {

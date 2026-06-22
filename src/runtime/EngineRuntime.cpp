@@ -9,6 +9,7 @@
 #include <string>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace cex::runtime {
 namespace {
@@ -281,6 +282,87 @@ template <typename Value>
          best_bid->price.ticks() >= price;
 }
 
+struct AdlCandidate {
+  PositionRiskKey key;
+  IsolatedPositionState position;
+  std::int64_t available_quantity{0};
+  std::int64_t unrealized_pnl{0};
+  std::int32_t leverage{0};
+  std::int64_t margin_ratio{0};
+};
+
+[[nodiscard]] bool has_opposing_exposure(std::int64_t liquidated_quantity,
+                                         std::int64_t candidate_quantity) {
+  return (liquidated_quantity > 0 && candidate_quantity < 0) ||
+         (liquidated_quantity < 0 && candidate_quantity > 0);
+}
+
+[[nodiscard]] std::vector<AdlCandidate> adl_candidates_for(
+    const cex::adapter::LiquidatePositionInput& input,
+    const IsolatedPositionState& liquidated_position,
+    const IsolatedPositionMap& positions,
+    const IsolatedRiskMap& risk_states) {
+  std::vector<AdlCandidate> candidates;
+  for (const auto& [key, position] : positions) {
+    if (key.market_id != input.market_id ||
+        key.user_id == input.liquidated_user_id ||
+        position.signed_quantity == 0 ||
+        !has_opposing_exposure(liquidated_position.signed_quantity,
+                               position.signed_quantity)) {
+      continue;
+    }
+
+    const auto risk = risk_states.find(key);
+    candidates.push_back(AdlCandidate{
+        .key = key,
+        .position = position,
+        .available_quantity = abs_quantity(position.signed_quantity),
+        .unrealized_pnl =
+            risk == risk_states.end() ? 0 : risk->second.unrealized_pnl,
+        .leverage = risk == risk_states.end() ? position.leverage
+                                              : risk->second.leverage,
+        .margin_ratio = risk == risk_states.end() ? 0
+                                                  : risk->second.margin_ratio,
+    });
+  }
+
+  // Runtime state does not maintain an exchange ADL quantile. For replayable
+  // selection, rank opposing accounts by available profit/risk signals:
+  // higher unrealized PnL, higher leverage, lower margin ratio, larger
+  // opposing exposure, then lower user id.
+  std::sort(candidates.begin(),
+            candidates.end(),
+            [](const AdlCandidate& left, const AdlCandidate& right) {
+              if (left.unrealized_pnl != right.unrealized_pnl) {
+                return left.unrealized_pnl > right.unrealized_pnl;
+              }
+              if (left.leverage != right.leverage) {
+                return left.leverage > right.leverage;
+              }
+              if (left.margin_ratio != right.margin_ratio) {
+                return left.margin_ratio < right.margin_ratio;
+              }
+              if (left.available_quantity != right.available_quantity) {
+                return left.available_quantity > right.available_quantity;
+              }
+              return left.key.user_id < right.key.user_id;
+            });
+  return candidates;
+}
+
+[[nodiscard]] std::int64_t total_adl_available(
+    const std::vector<AdlCandidate>& candidates,
+    std::int64_t limit) {
+  std::int64_t available = 0;
+  for (const auto& candidate : candidates) {
+    available += candidate.available_quantity;
+    if (available >= limit) {
+      return limit;
+    }
+  }
+  return available;
+}
+
 [[nodiscard]] std::string position_id_text(
     cex::adapter::AdapterUserId user_id,
     cex::adapter::MarketId market_id) {
@@ -437,6 +519,21 @@ void add_runtime_engine_fields(
       "LiquidationRejected", record, input, std::move(payload));
 }
 
+[[nodiscard]] EngineOutputRecord make_liquidation_accepted_reply(
+    const InboundEngineRecord& record,
+    const cex::adapter::LiquidatePositionInput& input,
+    const cex::adapter::OrderMetadata& metadata) {
+  PayloadFields payload{
+      {"liquidation_id", input.liquidation_id},
+      {"order_id", text(metadata.order_id)},
+  };
+  if (!metadata.reservation_id.empty()) {
+    payload.emplace("reservation_id", metadata.reservation_id);
+  }
+  return make_liquidation_reply(
+      "LiquidationAccepted", record, input, std::move(payload));
+}
+
 [[nodiscard]] EngineOutputRecord make_liquidation_started_event(
     const InboundEngineRecord& record,
     const cex::adapter::LiquidatePositionInput& input,
@@ -550,6 +647,200 @@ void add_runtime_engine_fields(
       .leverage = position.leverage,
       .source = input.source,
   };
+}
+
+[[nodiscard]] std::string adl_id_for(const std::string& liquidation_id,
+                                     std::int64_t priority_rank,
+                                     cex::adapter::AdapterUserId user_id) {
+  return liquidation_id + "-adl-" + text(priority_rank) + "-" + text(user_id);
+}
+
+[[nodiscard]] OrderId adl_counterparty_order_id(
+    const std::string& adl_id,
+    OrderId liquidation_order_id,
+    const cex::adapter::OrderMetadataStore& metadata_store) {
+  for (std::int64_t salt = 0; salt < 1'024; ++salt) {
+    const auto order_id =
+        cex::adapter::command_id_from_request_id("adl-order-" + adl_id +
+                                                 "-" + text(salt));
+    if (order_id != liquidation_order_id &&
+        metadata_store.find(order_id) == nullptr) {
+      return order_id;
+    }
+  }
+  throw std::runtime_error("unable to allocate deterministic ADL order id");
+}
+
+[[nodiscard]] cex::adapter::OrderMetadata adl_counterparty_metadata(
+    const cex::adapter::LiquidatePositionInput& input,
+    const AdlCandidate& candidate,
+    OrderId order_id,
+    std::int64_t fill_quantity,
+    std::int64_t priority_rank,
+    const std::string& adl_id) {
+  const auto stable_id = cex::adapter::command_id_from_request_id(adl_id);
+  return cex::adapter::OrderMetadata{
+      .order_id = order_id,
+      .market_id = input.market_id,
+      .user_id = candidate.key.user_id,
+      .side = liquidation_order_side(candidate.position.signed_quantity),
+      .original_quantity = fill_quantity,
+      .remaining_quantity = fill_quantity,
+      .reduce_only = true,
+      .margin_asset = candidate.position.margin_asset.empty()
+                          ? "USDC"
+                          : candidate.position.margin_asset,
+      .reserved_margin_amount = 0,
+      .remaining_reserved_margin = 0,
+      .leverage = candidate.position.leverage,
+      .reservation_id = "adl-" + input.liquidation_id + "-" +
+                        text(candidate.key.user_id) + "-" +
+                        text(priority_rank),
+      .place_request_id = adl_id,
+      .place_idempotency_key = adl_id,
+      .place_input_id = std::nullopt,
+      .reply_partition = input.envelope.reply_partition,
+      .core_client_order_id = stable_id,
+      .core_place_command_id = stable_id,
+  };
+}
+
+[[nodiscard]] TradeExecuted adl_trade_event(
+    const cex::adapter::LiquidatePositionInput& input,
+    const EngineEventTranslationContext& context,
+    const std::string& adl_id,
+    OrderId counterparty_order_id,
+    std::int64_t fill_quantity,
+    cex::adapter::AdapterPrice price) {
+  if (!context.pending_metadata.has_value()) {
+    throw std::runtime_error("ADL requires liquidation order metadata");
+  }
+  const auto trade_id = cex::adapter::command_id_from_request_id(
+      "adl-fill-" + adl_id);
+  return TradeExecuted{
+      .eventId = trade_id,
+      .sequence = 0,
+      .tradeId = trade_id,
+      .symbolId = static_cast<SymbolId>(input.market_id),
+      .makerOrderId = counterparty_order_id,
+      .takerOrderId = context.pending_metadata->order_id,
+      .price = Price::from_ticks(price),
+      .quantity = Quantity::from_lots(static_cast<std::uint64_t>(fill_quantity)),
+  };
+}
+
+void append_process_result(EngineProcessResult& result,
+                           const EngineProcessResult& translated) {
+  result.replies.insert(result.replies.end(),
+                        translated.replies.begin(),
+                        translated.replies.end());
+  result.events.insert(result.events.end(),
+                       translated.events.begin(),
+                       translated.events.end());
+}
+
+[[nodiscard]] std::int64_t append_adl_fills(
+    EngineProcessResult& result,
+    const cex::adapter::LiquidatePositionInput& input,
+    EngineEventTranslationContext& context,
+    std::int64_t remaining_quantity,
+    cex::adapter::AdapterPrice price,
+    const EngineEventTranslator& translator,
+    cex::adapter::OrderMetadataStore& metadata_store,
+    IsolatedPositionMap& positions,
+    IsolatedRiskMap& risk_states,
+    const std::unordered_map<cex::adapter::MarketId, MarkPriceState>&
+        mark_prices,
+    cex::adapter::MarketSequenceGenerator& market_sequences,
+    const EngineRuntimeClock& clock) {
+  const PositionRiskKey liquidated_key{
+      .user_id = input.liquidated_user_id,
+      .market_id = input.market_id,
+  };
+  const auto liquidated_position = positions.find(liquidated_key);
+  if (liquidated_position == positions.end() ||
+      liquidated_position->second.signed_quantity == 0 ||
+      remaining_quantity <= 0) {
+    return 0;
+  }
+
+  const auto candidates = adl_candidates_for(
+      input, liquidated_position->second, positions, risk_states);
+  std::int64_t executed_quantity = 0;
+  std::int64_t priority_rank = 1;
+
+  const auto previous_adl_execution = context.adl_execution;
+  const auto previous_adl_id = context.adl_id;
+  const auto previous_adl_counterparty_user_id =
+      context.adl_counterparty_user_id;
+  const auto previous_adl_priority_rank = context.adl_priority_rank;
+
+  for (const auto& candidate : candidates) {
+    if (remaining_quantity <= 0) {
+      break;
+    }
+
+    const auto fill_quantity =
+        std::min(remaining_quantity, candidate.available_quantity);
+    if (fill_quantity <= 0) {
+      ++priority_rank;
+      continue;
+    }
+
+    const auto adl_id =
+        adl_id_for(input.liquidation_id, priority_rank, candidate.key.user_id);
+    const auto liquidation_order_id =
+        context.pending_metadata.has_value()
+            ? context.pending_metadata->order_id
+            : OrderId{0};
+    const auto counterparty_order_id =
+        adl_counterparty_order_id(adl_id,
+                                  liquidation_order_id,
+                                  metadata_store);
+    auto metadata = adl_counterparty_metadata(input,
+                                              candidate,
+                                              counterparty_order_id,
+                                              fill_quantity,
+                                              priority_rank,
+                                              adl_id);
+    if (!metadata_store.insert(std::move(metadata))) {
+      throw std::runtime_error("ADL counterparty metadata already exists");
+    }
+
+    context.adl_execution = true;
+    context.adl_id = adl_id;
+    context.adl_counterparty_user_id = candidate.key.user_id;
+    context.adl_priority_rank = priority_rank;
+
+    const std::vector<EngineEvent> adl_events{
+        adl_trade_event(input,
+                        context,
+                        adl_id,
+                        counterparty_order_id,
+                        fill_quantity,
+                        price),
+    };
+    auto translated = translator.translate(adl_events,
+                                           context,
+                                           metadata_store,
+                                           positions,
+                                           risk_states,
+                                           mark_prices,
+                                           market_sequences,
+                                           clock);
+    append_process_result(result, translated);
+    (void)metadata_store.erase(counterparty_order_id);
+
+    remaining_quantity -= fill_quantity;
+    executed_quantity += fill_quantity;
+    ++priority_rank;
+  }
+
+  context.adl_execution = previous_adl_execution;
+  context.adl_id = previous_adl_id;
+  context.adl_counterparty_user_id = previous_adl_counterparty_user_id;
+  context.adl_priority_rank = previous_adl_priority_rank;
+  return executed_quantity;
 }
 
 [[nodiscard]] EngineProcessResult rejected_no_output() {
@@ -763,11 +1054,20 @@ EngineProcessResult EngineRuntime::process(const InboundEngineRecord& record,
         liquidation_price(input, previous_position, mark_prices_);
     const auto order_side =
         liquidation_order_side(previous_position.signed_quantity);
-    if (order_quantity <= 0 ||
-        !crossing_liquidity_exists(core_,
-                                   input.market_id,
-                                   order_side,
-                                   order_price)) {
+    const bool has_crossing_liquidity =
+        crossing_liquidity_exists(core_,
+                                  input.market_id,
+                                  order_side,
+                                  order_price);
+    const auto initial_adl_candidates =
+        adl_candidates_for(input,
+                           previous_position,
+                           positions_,
+                           risk_states_);
+    const auto initial_adl_available =
+        total_adl_available(initial_adl_candidates, order_quantity);
+    if (order_quantity <= 0 || order_price <= 0 ||
+        (!has_crossing_liquidity && initial_adl_available <= 0)) {
       result.replies.push_back(make_liquidation_rejected_reply(
           record, input, "no liquidation liquidity"));
       mark_processed(RuntimeCommandKind::LiquidatePosition,
@@ -801,8 +1101,13 @@ EngineProcessResult EngineRuntime::process(const InboundEngineRecord& record,
         .liquidation_position_side = input.position_side,
     };
 
-    auto core_events = core_.process(mapped.command);
-    if (!has_trade_executed(core_events)) {
+    std::vector<EngineEvent> core_events;
+    if (has_crossing_liquidity) {
+      core_events = core_.process(mapped.command);
+    }
+    const bool has_core_trade = has_trade_executed(core_events);
+    if (has_crossing_liquidity && !has_core_trade &&
+        initial_adl_available <= 0) {
       result.replies.clear();
       result.events.clear();
       result.replies.push_back(make_liquidation_rejected_reply(
@@ -820,28 +1125,52 @@ EngineProcessResult EngineRuntime::process(const InboundEngineRecord& record,
                                                            previous_risk,
                                                            market_sequences_,
                                                            clock_));
-    auto translated = translator_.translate(core_events,
-                                            context,
-                                            metadata_store_,
-                                            positions_,
-                                            risk_states_,
-                                            mark_prices_,
-                                            market_sequences_,
-                                            clock_);
+    if (has_crossing_liquidity) {
+      auto translated = translator_.translate(core_events,
+                                              context,
+                                              metadata_store_,
+                                              positions_,
+                                              risk_states_,
+                                              mark_prices_,
+                                              market_sequences_,
+                                              clock_);
+      append_process_result(result, translated);
+      cleanup_completed_order_metadata(metadata_store_, core_events);
+    } else {
+      result.replies.push_back(make_liquidation_accepted_reply(
+          record, input, *mapped.metadata_to_record));
+    }
 
-    result.replies.insert(result.replies.end(),
-                          translated.replies.begin(),
-                          translated.replies.end());
-    result.events.insert(result.events.end(),
-                         translated.events.begin(),
-                         translated.events.end());
-
-    cleanup_completed_order_metadata(metadata_store_, core_events);
     const auto remaining_position = positions_.find(key);
-    const auto remaining_quantity =
+    const auto pending_remaining =
+        context.pending_metadata.has_value()
+            ? context.pending_metadata->remaining_quantity
+            : std::int64_t{0};
+    const auto remaining_adl_quantity =
         remaining_position == positions_.end()
             ? 0
-            : abs_quantity(remaining_position->second.signed_quantity);
+            : std::min(pending_remaining,
+                       abs_quantity(remaining_position->second.signed_quantity));
+    if (remaining_adl_quantity > 0) {
+      (void)append_adl_fills(result,
+                             input,
+                             context,
+                             remaining_adl_quantity,
+                             order_price,
+                             translator_,
+                             metadata_store_,
+                             positions_,
+                             risk_states_,
+                             mark_prices_,
+                             market_sequences_,
+                             clock_);
+    }
+
+    const auto final_position = positions_.find(key);
+    const auto remaining_quantity =
+        final_position == positions_.end()
+            ? 0
+            : abs_quantity(final_position->second.signed_quantity);
     result.events.push_back(make_liquidation_completed_event(record,
                                                              input,
                                                              remaining_quantity,
