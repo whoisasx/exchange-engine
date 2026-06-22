@@ -179,6 +179,32 @@ void assert_payload_number(const protocol::ProtocolMessage& message,
   assert(value->text == expected);
 }
 
+const protocol::JsonValue::Array& payload_array(
+    const protocol::ProtocolMessage& message,
+    const std::string& field) {
+  const auto* value = payload_field(message, field).as_array();
+  assert(value != nullptr);
+  return *value;
+}
+
+void assert_json_number_field(const protocol::JsonValue& object,
+                              const std::string& field,
+                              const std::string& expected) {
+  const auto* value = object.find(field);
+  assert(value != nullptr);
+  const auto* number = value->as_number();
+  assert(number != nullptr);
+  assert(number->text == expected);
+}
+
+void assert_price_level_delta(const protocol::JsonValue& value,
+                              const std::string& expected_price,
+                              const std::string& expected_quantity) {
+  assert(value.as_object() != nullptr);
+  assert_json_number_field(value, "price", expected_price);
+  assert_json_number_field(value, "quantity", expected_quantity);
+}
+
 void assert_duplicate_result(const EngineProcessResult& result,
                              EngineDuplicateReason reason,
                              const std::string& key,
@@ -482,6 +508,11 @@ void test_runtime_resting_limit_order() {
   assert_payload_string(delta_message, "side", "LONG");
   assert_payload_number(delta_message, "price", "100");
   assert_payload_number(delta_message, "quantity", "10");
+  const auto& delta_bids = payload_array(delta_message, "bids");
+  assert(delta_bids.size() == 1);
+  assert_price_level_delta(delta_bids[0], "100", "10");
+  const auto& delta_asks = payload_array(delta_message, "asks");
+  assert(delta_asks.empty());
 }
 
 void test_runtime_crossing_order_emits_trade() {
@@ -523,11 +554,18 @@ void test_runtime_crossing_order_emits_trade() {
   assert_payload_string(trade_message,
                         "taker_reservation_id",
                         "res_taker_001");
+  assert(payload_array(trade_message, "fee_deltas").empty());
+  assert(payload_array(trade_message, "settlements").empty());
 
   const auto* delta = find_record(result.events, "OrderBookDelta");
   assert(delta != nullptr);
   assert(delta->payload.at("engine_sequence") == "4");
   assert(delta->payload.at("quantity") == "0");
+  const auto delta_message = parse_serialized_output(*delta);
+  const auto& delta_bids = payload_array(delta_message, "bids");
+  assert(delta_bids.size() == 1);
+  assert_price_level_delta(delta_bids[0], "100", "0");
+  assert(payload_array(delta_message, "asks").empty());
   assert(runtime.metadata_store().empty());
 }
 
@@ -1018,6 +1056,10 @@ void test_outbox_publishes_replies_then_events_with_routing_and_json() {
       delta, publisher.records[2].serialized_json);
   assert_payload_number(delta_message, "market_id", "1");
   assert_payload_number(delta_message, "engine_sequence", "2");
+  const auto& delta_bids = payload_array(delta_message, "bids");
+  assert(delta_bids.size() == 1);
+  assert_price_level_delta(delta_bids[0], "100", "10");
+  assert(payload_array(delta_message, "asks").empty());
 }
 
 void test_outbox_skips_duplicate_and_no_output_results() {

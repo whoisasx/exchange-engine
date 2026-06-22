@@ -43,6 +43,22 @@ template <typename Value>
   return "unknown";
 }
 
+[[nodiscard]] PayloadValue number_value(std::string value) {
+  return PayloadValue::number_text(std::move(value));
+}
+
+template <typename Value>
+[[nodiscard]] PayloadValue number_value(Value value) {
+  return number_value(text(value));
+}
+
+[[nodiscard]] PayloadValue price_level_delta(Price price, Quantity quantity) {
+  return PayloadValue::object(PayloadValue::Object{
+      {"price", number_value(price.ticks())},
+      {"quantity", number_value(quantity.lots())},
+  });
+}
+
 void add_source_fields(PayloadFields& payload,
                        const EngineEventTranslationContext& context) {
   if (context.input_id.has_value()) {
@@ -201,6 +217,8 @@ void append_trade_executed(
       {"maker_order_id", text(trade.makerOrderId)},
       {"taker_order_id", text(trade.takerOrderId)},
       {"execution_reason", "TRADE"},
+      {"fee_deltas", PayloadValue::array(PayloadValue::Array{})},
+      {"settlements", PayloadValue::array(PayloadValue::Array{})},
   };
   if (maker != nullptr) {
     payload.emplace("maker_user_id", text(maker->user_id));
@@ -263,6 +281,16 @@ void append_orderbook_delta(
       {"side", side_text(delta.side)},
       {"price", text(delta.price.ticks())},
       {"quantity", text(delta.totalQuantityAtPrice.lots())},
+      {"bids", PayloadValue::array(
+                   delta.side == Buy
+                       ? PayloadValue::Array{price_level_delta(
+                             delta.price, delta.totalQuantityAtPrice)}
+                       : PayloadValue::Array{})},
+      {"asks", PayloadValue::array(
+                   delta.side == Sell
+                       ? PayloadValue::Array{price_level_delta(
+                             delta.price, delta.totalQuantityAtPrice)}
+                       : PayloadValue::Array{})},
   };
 
   result.events.push_back(make_event("OrderBookDelta",

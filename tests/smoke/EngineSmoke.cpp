@@ -210,6 +210,36 @@ void require_payload(const protocol::ProtocolMessage& message,
              message.type + " payload." + field);
 }
 
+const protocol::JsonValue::Array& require_payload_array(
+    const protocol::ProtocolMessage& message,
+    const std::string& field) {
+  const auto* value = message.payload.find(field);
+  require(value != nullptr, message.type + " payload missing " + field);
+  const auto* array = value->as_array();
+  require(array != nullptr,
+          message.type + " payload." + field + " is not an array");
+  return *array;
+}
+
+void require_price_level_delta(const protocol::JsonValue& value,
+                               const std::string& expected_price,
+                               const std::string& expected_quantity,
+                               const std::string& label) {
+  require(value.as_object() != nullptr, label + " is not an object");
+  const auto* price = value.find("price");
+  require(price != nullptr, label + " missing price");
+  require(price->as_number() != nullptr, label + ".price is not a number");
+  require_eq(price->as_number()->text, expected_price, label + ".price");
+
+  const auto* quantity = value.find("quantity");
+  require(quantity != nullptr, label + " missing quantity");
+  require(quantity->as_number() != nullptr,
+          label + ".quantity is not a number");
+  require_eq(quantity->as_number()->text,
+             expected_quantity,
+             label + ".quantity");
+}
+
 const CapturingPublisher::PublishedRecord& require_published_type(
     const std::vector<CapturingPublisher::PublishedRecord>& records,
     const std::string& type) {
@@ -318,6 +348,18 @@ void run_resting_crossing_and_duplicate_smoke() {
   require_payload(resting_delta_message, "side", "LONG");
   require_payload(resting_delta_message, "price", "100");
   require_payload(resting_delta_message, "quantity", "10");
+  const auto& resting_bids = require_payload_array(resting_delta_message, "bids");
+  require_eq(static_cast<std::int64_t>(resting_bids.size()),
+             1,
+             "resting delta bids count");
+  require_price_level_delta(resting_bids[0],
+                            "100",
+                            "10",
+                            "resting delta bids[0]");
+  require_eq(static_cast<std::int64_t>(
+                 require_payload_array(resting_delta_message, "asks").size()),
+             0,
+             "resting delta asks count");
   require(runtime.metadata_store().find(9001) != nullptr,
           "resting order metadata was not retained");
 
@@ -356,6 +398,14 @@ void run_resting_crossing_and_duplicate_smoke() {
   require_payload(trade_message, "taker_order_id", "9002");
   require_payload(trade_message, "maker_reservation_id", "res_place_001");
   require_payload(trade_message, "taker_reservation_id", "res_taker_001");
+  require_eq(static_cast<std::int64_t>(
+                 require_payload_array(trade_message, "fee_deltas").size()),
+             0,
+             "trade fee_deltas count");
+  require_eq(static_cast<std::int64_t>(
+                 require_payload_array(trade_message, "settlements").size()),
+             0,
+             "trade settlements count");
 
   const auto& crossing_delta =
       require_published_type(crossing.published, "OrderBookDelta");
@@ -365,6 +415,19 @@ void run_resting_crossing_and_duplicate_smoke() {
   require_payload(crossing_delta_message, "side", "LONG");
   require_payload(crossing_delta_message, "price", "100");
   require_payload(crossing_delta_message, "quantity", "0");
+  const auto& crossing_bids =
+      require_payload_array(crossing_delta_message, "bids");
+  require_eq(static_cast<std::int64_t>(crossing_bids.size()),
+             1,
+             "crossing delta bids count");
+  require_price_level_delta(crossing_bids[0],
+                            "100",
+                            "0",
+                            "crossing delta bids[0]");
+  require_eq(static_cast<std::int64_t>(
+                 require_payload_array(crossing_delta_message, "asks").size()),
+             0,
+             "crossing delta asks count");
   require(runtime.metadata_store().empty(),
           "filled maker metadata was not cleaned up");
   require_eq(static_cast<std::int64_t>(runtime.market_sequences().peek(1)), 5,
@@ -431,6 +494,15 @@ void run_cancel_smoke() {
   require_payload(delta_message, "side", "LONG");
   require_payload(delta_message, "price", "100");
   require_payload(delta_message, "quantity", "0");
+  const auto& bids = require_payload_array(delta_message, "bids");
+  require_eq(static_cast<std::int64_t>(bids.size()),
+             1,
+             "cancel delta bids count");
+  require_price_level_delta(bids[0], "100", "0", "cancel delta bids[0]");
+  require_eq(static_cast<std::int64_t>(
+                 require_payload_array(delta_message, "asks").size()),
+             0,
+             "cancel delta asks count");
   require(runtime.metadata_store().empty(),
           "cancelled order metadata was not cleaned up");
 }
