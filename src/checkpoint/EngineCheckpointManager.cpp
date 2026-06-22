@@ -54,6 +54,8 @@ EngineCheckpoint EngineCheckpointManager::create_checkpoint(
       .public_sequences = std::move(runtime_snapshot.public_sequences),
       .mark_prices = std::move(runtime_snapshot.mark_prices),
       .funding_rates = std::move(runtime_snapshot.funding_rates),
+      .settled_funding_intervals =
+          std::move(runtime_snapshot.settled_funding_intervals),
       .positions = std::move(runtime_snapshot.positions),
       .risk_states = std::move(runtime_snapshot.risk_states),
       .metadata_store = std::move(runtime_snapshot.metadata_store),
@@ -77,6 +79,7 @@ void EngineCheckpointManager::restore_runtime(
       .public_sequences = checkpoint.public_sequences,
       .mark_prices = checkpoint.mark_prices,
       .funding_rates = checkpoint.funding_rates,
+      .settled_funding_intervals = checkpoint.settled_funding_intervals,
       .positions = checkpoint.positions,
       .risk_states = checkpoint.risk_states,
       .processed_input_ids = checkpoint.processed_input_ids,

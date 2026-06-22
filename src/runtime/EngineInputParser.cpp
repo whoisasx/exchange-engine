@@ -233,6 +233,12 @@ ParsedEngineInput EngineInputParser::parse(std::string_view raw_json) const {
         .value = parse_funding_rate_updated(message),
     };
   }
+  if (message.type == "FundingSettlementTick") {
+    return ParsedEngineInput{
+        .kind = ParsedEngineInputKind::FundingSettlementTick,
+        .value = parse_funding_settlement_tick(message),
+    };
+  }
 
   throw parser_error("unsupported engine input type '" + message.type + "'");
 }
@@ -337,6 +343,24 @@ EngineInputParser::parse_funding_rate_updated(
   }
 
   return input;
+}
+
+cex::adapter::FundingSettlementTickInput
+EngineInputParser::parse_funding_settlement_tick(
+    const protocol::ProtocolMessage& message) const {
+  if (message.type != "FundingSettlementTick") {
+    throw parser_error("expected FundingSettlementTick message");
+  }
+
+  const auto& payload = message.payload;
+  return cex::adapter::FundingSettlementTickInput{
+      .input_id = optional_payload_string(message, "input_id"),
+      .market_id = require_i64(payload, "market_id", "payload"),
+      .funding_interval_id =
+          require_payload_string(message, "funding_interval_id"),
+      .settle_at_ms = require_i64(payload, "settle_at_ms", "payload"),
+      .source = std::nullopt,
+  };
 }
 
 }  // namespace cex::runtime

@@ -203,6 +203,11 @@ std::string place_order_fixture() {
                    "engine-place-order.command.json");
 }
 
+std::string funding_settlement_tick_fixture() {
+  return read_file(std::filesystem::path(PROTOCOL_EXAMPLES_DIR) /
+                   "engine-funding-settlement-tick.input.json");
+}
+
 ConsumedRecord make_input_record(std::int64_t offset, std::string value) {
   return ConsumedRecord{
       .topic = EngineInputTopic,
@@ -382,6 +387,26 @@ void test_duplicate_no_output_result_commits_without_publishes() {
   assert_committed_source_offset(committer, 302);
 }
 
+void test_rejected_no_output_result_commits_without_publishes() {
+  FakeConsumer consumer({make_input_record(351,
+                                           funding_settlement_tick_fixture())});
+  FakeProducer producer;
+  FakeCommitter committer;
+  auto runtime = make_runtime();
+  RedpandaEngineApp app(consumer, producer, committer, runtime);
+
+  const auto result = app.poll_once();
+
+  assert(result.status == EngineBrokerAppStatus::Processed);
+  assert(result.process_status == cex::runtime::EngineProcessStatus::Rejected);
+  assert(result.committed);
+  assert(result.publish_result.ok());
+  assert(result.publish_result.attempted == 0);
+  assert(result.publish_result.published == 0);
+  assert(producer.records.empty());
+  assert_committed_source_offset(committer, 351);
+}
+
 void test_wrong_input_topic_is_rejected_without_commit() {
   const auto place_order = place_order_fixture();
   ConsumedRecord wrong_topic = make_input_record(401, place_order);
@@ -413,6 +438,7 @@ int main() {
     test_publish_failure_does_not_commit();
     test_checkpoint_failure_does_not_commit();
     test_duplicate_no_output_result_commits_without_publishes();
+    test_rejected_no_output_result_commits_without_publishes();
     test_wrong_input_topic_is_rejected_without_commit();
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

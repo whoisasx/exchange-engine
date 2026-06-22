@@ -170,6 +170,162 @@ template <typename Value>
   };
 }
 
+[[nodiscard]] PayloadValue number_value(std::string value) {
+  return PayloadValue::number_text(std::move(value));
+}
+
+template <typename Value>
+[[nodiscard]] PayloadValue number_value(Value value) {
+  return number_value(text(value));
+}
+
+[[nodiscard]] std::int64_t abs_quantity(std::int64_t quantity) {
+  return quantity < 0 ? -quantity : quantity;
+}
+
+[[nodiscard]] std::string position_side_text(std::int64_t signed_quantity) {
+  if (signed_quantity > 0) {
+    return "LONG";
+  }
+  if (signed_quantity < 0) {
+    return "SHORT";
+  }
+  return "FLAT";
+}
+
+[[nodiscard]] std::string position_id_text(
+    cex::adapter::AdapterUserId user_id,
+    cex::adapter::MarketId market_id) {
+  return "pos_" + text(user_id) + "_" + text(market_id);
+}
+
+[[nodiscard]] std::int64_t maintenance_margin_for(
+    std::int64_t signed_quantity,
+    cex::adapter::AdapterPrice price) {
+  return (abs_quantity(signed_quantity) * price) / 20;
+}
+
+[[nodiscard]] std::int64_t margin_ratio_for(std::int64_t equity,
+                                            std::int64_t maintenance_margin) {
+  if (maintenance_margin == 0) {
+    return 0;
+  }
+  return (equity * 10'000) / maintenance_margin;
+}
+
+void add_runtime_source_fields(PayloadFields& payload,
+                               const InboundEngineRecord& record,
+                               const std::optional<std::string>& input_id) {
+  if (input_id.has_value()) {
+    payload.emplace("source_input_id", *input_id);
+  }
+  payload.emplace("source_input_offset", number_value(record.offset));
+}
+
+void add_runtime_engine_fields(
+    PayloadFields& payload,
+    cex::adapter::MarketId market_id,
+    cex::adapter::MarketSequenceGenerator& market_sequences,
+    const EngineRuntimeClock& clock) {
+  const EngineSequence sequence = market_sequences.next(market_id);
+  payload.emplace("engine_sequence", number_value(sequence));
+  payload.emplace("engine_event_id",
+                  "eng_" + text(market_id) + "_" + text(sequence));
+  payload.emplace("engine_timestamp_ms", number_value(clock ? clock() : 0));
+}
+
+[[nodiscard]] EngineOutputRecord make_runtime_market_event(
+    std::string type,
+    cex::adapter::MarketId market_id,
+    const InboundEngineRecord& record,
+    const std::optional<std::string>& input_id,
+    cex::adapter::MarketSequenceGenerator& market_sequences,
+    const EngineRuntimeClock& clock,
+    PayloadFields payload) {
+  add_runtime_engine_fields(payload, market_id, market_sequences, clock);
+  add_runtime_source_fields(payload, record, input_id);
+  payload.emplace("market_id", number_value(market_id));
+
+  return EngineOutputRecord{
+      .topic = EngineEventsTopic,
+      .type = std::move(type),
+      .key = text(market_id),
+      .partition = std::nullopt,
+      .payload = std::move(payload),
+  };
+}
+
+[[nodiscard]] cex::adapter::AdapterPrice settlement_mark_price_for(
+    const IsolatedPositionState& position,
+    const std::unordered_map<cex::adapter::MarketId, MarkPriceState>&
+        mark_prices) {
+  const auto mark = mark_prices.find(position.market_id);
+  return mark == mark_prices.end() ? position.average_entry_price
+                                   : mark->second.mark_price;
+}
+
+[[nodiscard]] std::string settlement_asset_for(
+    const IsolatedPositionState& position) {
+  return position.margin_asset.empty() ? "USDC" : position.margin_asset;
+}
+
+[[nodiscard]] EngineOutputRecord make_funding_payment_applied_event(
+    const InboundEngineRecord& record,
+    const cex::adapter::FundingSettlementTickInput& input,
+    PayloadValue::Array payments,
+    cex::adapter::MarketSequenceGenerator& market_sequences,
+    const EngineRuntimeClock& clock) {
+  PayloadFields payload{
+      {"funding_interval_id", input.funding_interval_id},
+      {"payments", PayloadValue::array(std::move(payments))},
+  };
+  return make_runtime_market_event("FundingPaymentApplied",
+                                   input.market_id,
+                                   record,
+                                   input.input_id,
+                                   market_sequences,
+                                   clock,
+                                   std::move(payload));
+}
+
+[[nodiscard]] EngineOutputRecord make_runtime_risk_state_updated_event(
+    const InboundEngineRecord& record,
+    const std::optional<std::string>& input_id,
+    const IsolatedRiskState& risk,
+    cex::adapter::MarketSequenceGenerator& market_sequences,
+    const EngineRuntimeClock& clock) {
+  PayloadFields payload{
+      {"user_id", number_value(risk.user_id)},
+      {"position_id", position_id_text(risk.user_id, risk.market_id)},
+      {"status", risk.status},
+      {"signed_quantity", number_value(risk.signed_quantity)},
+      {"quantity", number_value(abs_quantity(risk.signed_quantity))},
+      {"average_entry_price", number_value(risk.average_entry_price)},
+      {"entry_price", number_value(risk.average_entry_price)},
+      {"mark_price", number_value(risk.mark_price)},
+      {"isolated_margin", number_value(risk.isolated_margin)},
+      {"unrealized_pnl", number_value(risk.unrealized_pnl)},
+      {"equity", number_value(risk.equity)},
+      {"maintenance_margin", number_value(risk.maintenance_margin)},
+      {"margin_ratio", number_value(risk.margin_ratio)},
+      {"margin_asset", risk.margin_asset},
+      {"leverage", number_value(risk.leverage)},
+  };
+  return make_runtime_market_event("RiskStateUpdated",
+                                   risk.market_id,
+                                   record,
+                                   input_id,
+                                   market_sequences,
+                                   clock,
+                                   std::move(payload));
+}
+
+[[nodiscard]] EngineProcessResult rejected_no_output() {
+  EngineProcessResult result;
+  result.status = EngineProcessStatus::Rejected;
+  return result;
+}
+
 EngineProcessResult apply_processing_mode(EngineProcessResult result,
                                           ProcessingMode mode) {
   if (mode == ProcessingMode::ReplaySilent) {
@@ -381,6 +537,115 @@ EngineProcessResult EngineRuntime::process(const InboundEngineRecord& record,
     return apply_processing_mode(std::move(result), mode);
   }
 
+  if (parsed.kind == ParsedEngineInputKind::FundingSettlementTick) {
+    auto input =
+        std::get<cex::adapter::FundingSettlementTickInput>(parsed.value);
+    if (auto duplicate = duplicate_input_result_for(input.input_id);
+        duplicate.has_value()) {
+      return *duplicate;
+    }
+
+    input.source = broker_context(record);
+
+    const FundingSettlementKey settlement_key{
+        .market_id = input.market_id,
+        .funding_interval_id = input.funding_interval_id,
+    };
+    if (settled_funding_intervals_.contains(settlement_key)) {
+      mark_input_processed(RuntimeCommandKind::FundingSettlementTick,
+                           record,
+                           input.input_id);
+      return EngineProcessResult{};
+    }
+
+    const auto funding = funding_rates_.find(input.market_id);
+    if (funding == funding_rates_.end() ||
+        funding->second.funding_interval_id != input.funding_interval_id) {
+      mark_input_processed(RuntimeCommandKind::FundingSettlementTick,
+                           record,
+                           input.input_id);
+      return rejected_no_output();
+    }
+
+    EngineProcessResult result;
+    PayloadValue::Array payments;
+    std::vector<PositionRiskKey> paid_keys;
+
+    for (const auto& [key, position] : positions_) {
+      if (position.market_id != input.market_id ||
+          position.signed_quantity == 0) {
+        continue;
+      }
+
+      const auto mark_price =
+          settlement_mark_price_for(position, mark_prices_);
+      const auto amount =
+          -((position.signed_quantity * mark_price * funding->second.rate) /
+            funding->second.rate_scale);
+      if (amount == 0) {
+        continue;
+      }
+
+      payments.push_back(PayloadValue::object(PayloadValue::Object{
+          {"user_id", number_value(position.user_id)},
+          {"position_id", position_id_text(position.user_id,
+                                           position.market_id)},
+          {"side", position_side_text(position.signed_quantity)},
+          {"asset", settlement_asset_for(position)},
+          {"amount", number_value(amount)},
+      }));
+
+      auto& risk = risk_states_[key];
+      if (risk.user_id == 0 && risk.market_id == 0) {
+        risk.user_id = position.user_id;
+        risk.market_id = position.market_id;
+        risk.equity = position.isolated_margin;
+      }
+      risk.user_id = position.user_id;
+      risk.market_id = position.market_id;
+      risk.margin_asset = settlement_asset_for(position);
+      risk.signed_quantity = position.signed_quantity;
+      risk.average_entry_price = position.average_entry_price;
+      risk.mark_price = mark_price;
+      risk.isolated_margin = position.isolated_margin;
+      risk.unrealized_pnl =
+          (mark_price - position.average_entry_price) *
+          position.signed_quantity;
+      risk.equity += amount;
+      risk.maintenance_margin =
+          maintenance_margin_for(position.signed_quantity, mark_price);
+      risk.margin_ratio =
+          margin_ratio_for(risk.equity, risk.maintenance_margin);
+      risk.leverage = position.leverage;
+      risk.updated_at_ms = input.settle_at_ms;
+      if (position.signed_quantity == 0) {
+        risk.status = "FLAT";
+      } else if (risk.equity <= risk.maintenance_margin) {
+        risk.status = "LIQUIDATABLE";
+      } else {
+        risk.status = "HEALTHY";
+      }
+      paid_keys.push_back(key);
+    }
+
+    result.events.push_back(make_funding_payment_applied_event(
+        record, input, std::move(payments), market_sequences_, clock_));
+    for (const auto& key : paid_keys) {
+      result.events.push_back(make_runtime_risk_state_updated_event(
+          record,
+          input.input_id,
+          risk_states_.at(key),
+          market_sequences_,
+          clock_));
+    }
+
+    settled_funding_intervals_.insert(settlement_key);
+    mark_input_processed(RuntimeCommandKind::FundingSettlementTick,
+                         record,
+                         input.input_id);
+    return apply_processing_mode(std::move(result), mode);
+  }
+
   auto input = std::get<cex::adapter::CancelOrderInput>(parsed.value);
   if (auto duplicate = duplicate_result_for(input.input_id,
                                             input.envelope.idempotency_key);
@@ -441,6 +706,11 @@ EngineRuntime::funding_rates() const noexcept {
   return funding_rates_;
 }
 
+const FundingSettlementSet& EngineRuntime::settled_funding_intervals()
+    const noexcept {
+  return settled_funding_intervals_;
+}
+
 const IsolatedPositionMap& EngineRuntime::positions() const noexcept {
   return positions_;
 }
@@ -456,6 +726,7 @@ EngineRuntimeStateSnapshot EngineRuntime::snapshot_state() const {
       .public_sequences = market_sequences_.snapshot(),
       .mark_prices = mark_prices_,
       .funding_rates = funding_rates_,
+      .settled_funding_intervals = settled_funding_intervals_,
       .positions = positions_,
       .risk_states = risk_states_,
   };
@@ -502,6 +773,7 @@ void EngineRuntime::restore_state(
 
   mark_prices_ = snapshot.mark_prices;
   funding_rates_ = snapshot.funding_rates;
+  settled_funding_intervals_ = snapshot.settled_funding_intervals;
   positions_ = snapshot.positions;
   risk_states_ = snapshot.risk_states;
 

@@ -38,6 +38,7 @@ struct EngineOutputRecord {
 enum class EngineProcessStatus {
   Processed,
   Duplicate,
+  Rejected,
 };
 
 enum class ProcessingMode {

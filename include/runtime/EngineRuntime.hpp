@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
 
@@ -31,12 +32,30 @@ struct FundingRateState {
   std::int64_t source_timestamp_ms{0};
 };
 
+struct FundingSettlementKey {
+  cex::adapter::MarketId market_id{0};
+  std::string funding_interval_id;
+
+  [[nodiscard]] friend bool operator==(const FundingSettlementKey&,
+                                       const FundingSettlementKey&) = default;
+  [[nodiscard]] friend bool operator<(const FundingSettlementKey& left,
+                                      const FundingSettlementKey& right) {
+    if (left.market_id != right.market_id) {
+      return left.market_id < right.market_id;
+    }
+    return left.funding_interval_id < right.funding_interval_id;
+  }
+};
+
+using FundingSettlementSet = std::set<FundingSettlementKey>;
+
 struct EngineRuntimeStateSnapshot {
   EngineSnapshot core_snapshot;
   cex::adapter::OrderMetadataStore metadata_store;
   std::unordered_map<cex::adapter::MarketId, EngineSequence> public_sequences;
   std::unordered_map<cex::adapter::MarketId, MarkPriceState> mark_prices;
   std::unordered_map<cex::adapter::MarketId, FundingRateState> funding_rates;
+  FundingSettlementSet settled_funding_intervals;
   IsolatedPositionMap positions;
   IsolatedRiskMap risk_states;
   std::unordered_map<std::string, EngineRuntimeProcessedRequestSnapshot>
@@ -68,6 +87,8 @@ class EngineRuntime {
   [[nodiscard]] const std::unordered_map<cex::adapter::MarketId,
                                          FundingRateState>&
   funding_rates() const noexcept;
+  [[nodiscard]] const FundingSettlementSet& settled_funding_intervals()
+      const noexcept;
   [[nodiscard]] const IsolatedPositionMap& positions() const noexcept;
   [[nodiscard]] const IsolatedRiskMap& risk_states() const noexcept;
   [[nodiscard]] EngineRuntimeStateSnapshot snapshot_state() const;
@@ -118,6 +139,7 @@ class EngineRuntime {
   EngineEventTranslator translator_;
   std::unordered_map<cex::adapter::MarketId, MarkPriceState> mark_prices_;
   std::unordered_map<cex::adapter::MarketId, FundingRateState> funding_rates_;
+  FundingSettlementSet settled_funding_intervals_;
   IsolatedPositionMap positions_;
   IsolatedRiskMap risk_states_;
   std::unordered_map<std::string, ProcessedRuntimeRequest>

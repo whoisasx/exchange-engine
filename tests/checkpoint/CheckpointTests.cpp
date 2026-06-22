@@ -196,6 +196,34 @@ std::string funding_rate_json() {
 })json";
 }
 
+std::string funding_rate_settlement_json() {
+  return R"json({
+  "type": "FundingRateUpdated",
+  "payload": {
+    "input_id": "input_funding_rate_settle_001",
+    "market_id": 1,
+    "funding_interval_id": "funding_SOL-PERP_1710000000_1710028800",
+    "rate": 10000,
+    "rate_scale": 1000000,
+    "interval_start_ms": 1710000000000,
+    "interval_end_ms": 1710028800000,
+    "source_timestamp_ms": 1710000001000
+  }
+})json";
+}
+
+std::string funding_settlement_tick_json() {
+  return R"json({
+  "type": "FundingSettlementTick",
+  "payload": {
+    "input_id": "input_funding_settle_001",
+    "market_id": 1,
+    "funding_interval_id": "funding_SOL-PERP_1710000000_1710028800",
+    "settle_at_ms": 1710028800000
+  }
+})json";
+}
+
 void assert_position_and_risk_state(const EngineRuntimeStateSnapshot& snapshot) {
   assert(snapshot.positions.size() == 2);
   assert(snapshot.risk_states.size() == 2);
@@ -293,6 +321,29 @@ EngineCheckpoint make_funding_checkpoint(
           .topic = EngineInputTopic,
           .partition = 0,
           .next_offset = 1312,
+      },
+      std::move(checkpoint_id));
+}
+
+EngineCheckpoint make_settled_funding_checkpoint(
+    std::string checkpoint_id = "settled-funding-checkpoint-1") {
+  auto runtime = make_runtime();
+  (void)runtime.process(make_record(place_order_json(), 1501));
+  const auto fill = runtime.process(make_record(crossing_order_json(), 1502));
+  assert(fill.status == EngineProcessStatus::Processed);
+  (void)runtime.process(make_record(funding_rate_settlement_json(), 1503));
+  const auto settlement =
+      runtime.process(make_record(funding_settlement_tick_json(), 1504));
+  assert(settlement.status == EngineProcessStatus::Processed);
+  assert(settlement.events.size() == 3);
+
+  EngineCheckpointManager manager;
+  return manager.create_checkpoint(
+      runtime,
+      CheckpointSourcePosition{
+          .topic = EngineInputTopic,
+          .partition = 0,
+          .next_offset = 1505,
       },
       std::move(checkpoint_id));
 }
@@ -396,6 +447,41 @@ void test_checkpoint_restore_preserves_position_and_risk_state() {
   assert(restored_snapshot.public_sequences.at(1) == 9);
   assert_position_and_risk_state(restored_snapshot);
   assert(restored.metadata_store().empty());
+}
+
+void test_checkpoint_restore_preserves_settled_funding_and_adjusted_risk() {
+  const auto checkpoint = make_settled_funding_checkpoint();
+  const FundingSettlementKey settlement_key{
+      .market_id = 1,
+      .funding_interval_id = "funding_SOL-PERP_1710000000_1710028800",
+  };
+  const auto maker_key = PositionRiskKey{.user_id = 42, .market_id = 1};
+  const auto taker_key = PositionRiskKey{.user_id = 43, .market_id = 1};
+
+  assert(checkpoint.public_sequences.at(1) == 13);
+  assert(checkpoint.settled_funding_intervals.contains(settlement_key));
+  assert(checkpoint.risk_states.at(maker_key).equity == 90);
+  assert(checkpoint.risk_states.at(taker_key).equity == 110);
+  assert(checkpoint.processed_input_ids.contains("input_funding_settle_001"));
+  assert(checkpoint.processed_input_ids.at("input_funding_settle_001")
+             .command_kind == RuntimeCommandKind::FundingSettlementTick);
+
+  auto restored = make_runtime();
+  EngineCheckpointManager manager;
+  manager.restore_runtime(checkpoint, restored);
+
+  const auto snapshot = restored.snapshot_state();
+  assert(snapshot.public_sequences.at(1) == 13);
+  assert(snapshot.settled_funding_intervals.contains(settlement_key));
+  assert(snapshot.risk_states.at(maker_key).equity == 90);
+  assert(snapshot.risk_states.at(taker_key).equity == 110);
+
+  const auto duplicate = restored.process_replay(
+      make_record(funding_settlement_tick_json(), 1504));
+  assert(duplicate.status == EngineProcessStatus::Duplicate);
+  assert(duplicate.empty());
+  assert(restored.risk_states().at(maker_key).equity == 90);
+  assert(restored.risk_states().at(taker_key).equity == 110);
 }
 
 void test_checkpoint_source_position_validation_is_explicit() {
@@ -536,6 +622,7 @@ int main() {
     test_checkpoint_restore_preserves_mark_price_state();
     test_checkpoint_restore_preserves_funding_rate_state();
     test_checkpoint_restore_preserves_position_and_risk_state();
+    test_checkpoint_restore_preserves_settled_funding_and_adjusted_risk();
     test_checkpoint_source_position_validation_is_explicit();
     test_create_checkpoint_rejects_invalid_source_position();
     test_in_memory_store_saves_and_loads_latest();

@@ -204,6 +204,16 @@ void assert_json_number_field(const protocol::JsonValue& object,
   assert(number->text == expected);
 }
 
+void assert_json_string_field(const protocol::JsonValue& object,
+                              const std::string& field,
+                              const std::string& expected) {
+  const auto* value = object.find(field);
+  assert(value != nullptr);
+  const auto* text = value->as_string();
+  assert(text != nullptr);
+  assert(*text == expected);
+}
+
 void assert_price_level_delta(const protocol::JsonValue& value,
                               const std::string& expected_price,
                               const std::string& expected_quantity) {
@@ -391,6 +401,67 @@ std::string crossing_order_json() {
 })json";
 }
 
+std::string funding_rate_settlement_json(
+    const std::string& input_id = "input_funding_rate_settle_001",
+    const std::string& interval_id =
+        "funding_SOL-PERP_1710000000_1710028800",
+    std::int64_t rate = 10'000,
+    std::int64_t rate_scale = 1'000'000) {
+  std::ostringstream json;
+  json << R"json({
+  "type": "FundingRateUpdated",
+  "payload": {
+    "input_id": ")json"
+       << input_id << R"json(",
+    "market_id": 1,
+    "funding_interval_id": ")json"
+       << interval_id << R"json(",
+    "rate": )json"
+       << rate << R"json(,
+    "rate_scale": )json"
+       << rate_scale << R"json(,
+    "interval_start_ms": 1710000000000,
+    "interval_end_ms": 1710028800000,
+    "source_timestamp_ms": 1710000001000
+  }
+})json";
+  return json.str();
+}
+
+std::string funding_settlement_tick_json(
+    const std::string& input_id = "input_funding_settle_001",
+    const std::string& interval_id =
+        "funding_SOL-PERP_1710000000_1710028800") {
+  std::ostringstream json;
+  json << R"json({
+  "type": "FundingSettlementTick",
+  "payload": {
+    "input_id": ")json"
+       << input_id << R"json(",
+    "market_id": 1,
+    "funding_interval_id": ")json"
+       << interval_id << R"json(",
+    "settle_at_ms": 1710028800000
+  }
+})json";
+  return json.str();
+}
+
+void open_opposite_positions(EngineRuntime& runtime) {
+  const auto resting = runtime.process(make_record(
+      place_order_json("input_funding_maker_001",
+                       "req_funding_maker_001",
+                       "idem-funding-maker-001",
+                       9101,
+                       "res_funding_maker_001"),
+      1701));
+  assert(resting.status == EngineProcessStatus::Processed);
+  const auto crossing = runtime.process(make_record(crossing_order_json(), 1702));
+  assert(crossing.status == EngineProcessStatus::Processed);
+  assert_position_state(runtime, 42, 10, 100, 100);
+  assert_position_state(runtime, 43, -10, 100, 100);
+}
+
 void test_parses_place_order_fixture() {
   const auto raw = read_file(
       std::filesystem::path(PROTOCOL_EXAMPLES_DIR) /
@@ -463,6 +534,24 @@ void test_parses_funding_rate_updated_fixture() {
   assert(input.source_timestamp_ms == 1'710'000'001'000LL);
 }
 
+void test_parses_funding_settlement_tick_fixture() {
+  const auto raw = read_file(
+      std::filesystem::path(PROTOCOL_EXAMPLES_DIR) /
+      "engine-funding-settlement-tick.input.json");
+
+  EngineInputParser parser;
+  const auto parsed = parser.parse(raw);
+  assert(parsed.kind == ParsedEngineInputKind::FundingSettlementTick);
+
+  const auto& input =
+      std::get<cex::adapter::FundingSettlementTickInput>(parsed.value);
+  assert(input.input_id == "input_funding_settle_001");
+  assert(input.market_id == 1);
+  assert(input.funding_interval_id ==
+         "funding_SOL-PERP_1710000000_1710028800");
+  assert(input.settle_at_ms == 1'710'028'800'000LL);
+}
+
 void test_funding_rate_updated_validation() {
   EngineInputParser parser;
 
@@ -502,6 +591,25 @@ void test_funding_rate_updated_validation() {
     assert(false);
   } catch (const EngineInputParserError& error) {
     assert(std::string(error.what()).find("interval_end_ms") !=
+           std::string::npos);
+  }
+}
+
+void test_funding_settlement_tick_validation() {
+  EngineInputParser parser;
+
+  try {
+    (void)parser.parse(R"json({
+  "type": "FundingSettlementTick",
+  "payload": {
+    "input_id": "input_funding_settle_bad",
+    "market_id": 1,
+    "funding_interval_id": "funding_bad"
+  }
+})json");
+    assert(false);
+  } catch (const EngineInputParserError& error) {
+    assert(std::string(error.what()).find("settle_at_ms") !=
            std::string::npos);
   }
 }
@@ -920,6 +1028,134 @@ void test_runtime_funding_rate_updated_emits_event_without_reply() {
   assert(restored.market_sequences().peek(1) == 2);
 }
 
+void test_runtime_funding_settlement_applies_payments_and_updates_risk() {
+  auto runtime = make_runtime();
+  open_opposite_positions(runtime);
+  (void)runtime.process(
+      make_record(funding_rate_settlement_json(), 1703));
+
+  const auto result = runtime.process(
+      make_record(funding_settlement_tick_json(), 1704));
+  assert(result.status == EngineProcessStatus::Processed);
+  assert(result.duplicate == std::nullopt);
+  assert(result.replies.empty());
+  assert(result.events.size() == 3);
+  assert(result.events[0].type == "FundingPaymentApplied");
+  assert(result.events[1].type == "RiskStateUpdated");
+  assert(result.events[2].type == "RiskStateUpdated");
+
+  const auto& funding = result.events[0];
+  assert(funding.topic == EngineEventsTopic);
+  assert(funding.key == "1");
+  assert(funding.payload.at("engine_event_id") == "eng_1_10");
+  assert(payload_number_text(funding, "engine_sequence") == "10");
+  assert(payload_number_text(funding, "engine_timestamp_ms") ==
+         "1710000000000");
+  assert(payload_number_text(funding, "source_input_offset") == "1704");
+  assert(payload_number_text(funding, "market_id") == "1");
+  assert(funding.payload.at("source_input_id") == "input_funding_settle_001");
+  assert(funding.payload.at("funding_interval_id") ==
+         "funding_SOL-PERP_1710000000_1710028800");
+
+  const auto message = parse_serialized_output(funding);
+  assert_payload_number(message, "engine_sequence", "10");
+  assert_payload_number(message, "source_input_offset", "1704");
+  assert_payload_number(message, "market_id", "1");
+  assert_payload_string(message, "source_input_id", "input_funding_settle_001");
+  const auto& payments = payload_array(message, "payments");
+  assert(payments.size() == 2);
+  assert_json_number_field(payments[0], "user_id", "42");
+  assert_json_string_field(payments[0], "position_id", "pos_42_1");
+  assert_json_string_field(payments[0], "side", "LONG");
+  assert_json_string_field(payments[0], "asset", "USDC");
+  assert_json_number_field(payments[0], "amount", "-10");
+  assert_json_number_field(payments[1], "user_id", "43");
+  assert_json_string_field(payments[1], "position_id", "pos_43_1");
+  assert_json_string_field(payments[1], "side", "SHORT");
+  assert_json_string_field(payments[1], "asset", "USDC");
+  assert_json_number_field(payments[1], "amount", "10");
+
+  assert(result.events[1].payload.at("position_id") == "pos_42_1");
+  assert(payload_number_text(result.events[1], "equity") == "90");
+  assert(result.events[1].payload.at("status") == "HEALTHY");
+  assert(result.events[2].payload.at("position_id") == "pos_43_1");
+  assert(payload_number_text(result.events[2], "equity") == "110");
+  assert(result.events[2].payload.at("status") == "HEALTHY");
+
+  const auto maker_key = PositionRiskKey{.user_id = 42, .market_id = 1};
+  const auto taker_key = PositionRiskKey{.user_id = 43, .market_id = 1};
+  assert(runtime.risk_states().at(maker_key).equity == 90);
+  assert(runtime.risk_states().at(taker_key).equity == 110);
+  assert(runtime.settled_funding_intervals().contains(FundingSettlementKey{
+      .market_id = 1,
+      .funding_interval_id = "funding_SOL-PERP_1710000000_1710028800",
+  }));
+  assert(runtime.snapshot_state().processed_input_ids.contains(
+      "input_funding_settle_001"));
+}
+
+void test_runtime_funding_settlement_duplicate_input_and_interval_noop() {
+  auto runtime = make_runtime();
+  open_opposite_positions(runtime);
+  (void)runtime.process(
+      make_record(funding_rate_settlement_json(), 1721));
+  const auto first = runtime.process(
+      make_record(funding_settlement_tick_json(), 1722));
+  assert(first.status == EngineProcessStatus::Processed);
+
+  const auto duplicate_input = runtime.process(
+      make_record(funding_settlement_tick_json(), 1723));
+  assert_duplicate_result(duplicate_input,
+                          EngineDuplicateReason::InputId,
+                          "input_funding_settle_001",
+                          1722,
+                          "input_funding_settle_001");
+
+  const auto duplicate_interval = runtime.process(make_record(
+      funding_settlement_tick_json("input_funding_settle_002"), 1724));
+  assert(duplicate_interval.status == EngineProcessStatus::Processed);
+  assert(duplicate_interval.empty());
+  assert(runtime.settled_funding_intervals().size() == 1);
+
+  const auto maker_key = PositionRiskKey{.user_id = 42, .market_id = 1};
+  const auto taker_key = PositionRiskKey{.user_id = 43, .market_id = 1};
+  assert(runtime.risk_states().at(maker_key).equity == 90);
+  assert(runtime.risk_states().at(taker_key).equity == 110);
+  assert(runtime.snapshot_state().processed_input_ids.contains(
+      "input_funding_settle_002"));
+}
+
+void test_runtime_funding_settlement_missing_or_mismatched_rate_rejected() {
+  auto runtime = make_runtime();
+  open_opposite_positions(runtime);
+
+  const auto missing = runtime.process(make_record(
+      funding_settlement_tick_json("input_funding_missing_001"), 1731));
+  assert(missing.status == EngineProcessStatus::Rejected);
+  assert(missing.empty());
+  assert(runtime.settled_funding_intervals().empty());
+  assert(runtime.snapshot_state().processed_input_ids.contains(
+      "input_funding_missing_001"));
+
+  (void)runtime.process(make_record(funding_rate_settlement_json(
+                              "input_funding_rate_other_001",
+                              "funding_other_interval"),
+                          1732));
+  const auto mismatched = runtime.process(make_record(
+      funding_settlement_tick_json("input_funding_mismatch_001"), 1733));
+  assert(mismatched.status == EngineProcessStatus::Rejected);
+  assert(mismatched.empty());
+  assert(runtime.settled_funding_intervals().empty());
+
+  (void)runtime.process(
+      make_record(funding_rate_settlement_json(), 1734));
+  const auto valid = runtime.process(make_record(
+      funding_settlement_tick_json("input_funding_after_reject_001"), 1735));
+  assert(valid.status == EngineProcessStatus::Processed);
+  assert(valid.events.size() == 3);
+  assert(runtime.settled_funding_intervals().size() == 1);
+}
+
 void test_replay_silent_resting_order_updates_state_without_outputs() {
   auto runtime = make_runtime();
   const auto raw = read_file(
@@ -1044,6 +1280,49 @@ void test_replay_silent_funding_rate_updates_state_without_outputs() {
                           "input_funding_rate_001");
   assert(restored.market_sequences().peek(1) == 2);
   assert_funding_rate_fixture_state(restored.funding_rates().at(1));
+}
+
+void test_replay_silent_funding_settlement_updates_state_without_outputs() {
+  auto runtime = make_runtime();
+  (void)runtime.process_replay(make_record(
+      place_order_json("input_replay_funding_maker_001",
+                       "req_replay_funding_maker_001",
+                       "idem-replay-funding-maker-001",
+                       9401,
+                       "res_replay_funding_maker_001"),
+      1641));
+  (void)runtime.process_replay(make_record(crossing_order_json(), 1642));
+  (void)runtime.process_replay(
+      make_record(funding_rate_settlement_json(), 1643));
+
+  const auto result = runtime.process_replay(
+      make_record(funding_settlement_tick_json(), 1644));
+  assert(result.status == EngineProcessStatus::Processed);
+  assert(result.duplicate == std::nullopt);
+  assert(result.empty());
+  assert(runtime.settled_funding_intervals().contains(FundingSettlementKey{
+      .market_id = 1,
+      .funding_interval_id = "funding_SOL-PERP_1710000000_1710028800",
+  }));
+
+  const auto maker_key = PositionRiskKey{.user_id = 42, .market_id = 1};
+  const auto taker_key = PositionRiskKey{.user_id = 43, .market_id = 1};
+  assert(runtime.risk_states().at(maker_key).equity == 90);
+  assert(runtime.risk_states().at(taker_key).equity == 110);
+  assert(runtime.snapshot_state().processed_input_ids.contains(
+      "input_funding_settle_001"));
+
+  auto restored = make_runtime();
+  restored.restore_state(runtime.snapshot_state());
+  const auto duplicate = restored.process_replay(
+      make_record(funding_settlement_tick_json(), 1645));
+  assert_duplicate_result(duplicate,
+                          EngineDuplicateReason::InputId,
+                          "input_funding_settle_001",
+                          1644,
+                          "input_funding_settle_001");
+  assert(restored.risk_states().at(maker_key).equity == 90);
+  assert(restored.risk_states().at(taker_key).equity == 110);
 }
 
 void test_live_sequence_continues_after_replayed_events() {
@@ -1310,17 +1589,23 @@ int main() {
     test_parses_place_order_fixture();
     test_parses_mark_price_updated_fixture();
     test_parses_funding_rate_updated_fixture();
+    test_parses_funding_settlement_tick_fixture();
     test_funding_rate_updated_validation();
+    test_funding_settlement_tick_validation();
     test_runtime_resting_limit_order();
     test_runtime_crossing_order_emits_trade();
     test_mark_price_affects_fill_risk_state();
     test_runtime_cancel_order();
     test_runtime_mark_price_updated_emits_event_without_reply();
     test_runtime_funding_rate_updated_emits_event_without_reply();
+    test_runtime_funding_settlement_applies_payments_and_updates_risk();
+    test_runtime_funding_settlement_duplicate_input_and_interval_noop();
+    test_runtime_funding_settlement_missing_or_mismatched_rate_rejected();
     test_replay_silent_resting_order_updates_state_without_outputs();
     test_replay_silent_crossing_order_updates_state_without_outputs();
     test_replay_silent_mark_price_updates_state_without_outputs();
     test_replay_silent_funding_rate_updates_state_without_outputs();
+    test_replay_silent_funding_settlement_updates_state_without_outputs();
     test_live_sequence_continues_after_replayed_events();
     test_place_order_duplicate_input_id_is_silent();
     test_place_order_duplicate_idempotency_is_silent();

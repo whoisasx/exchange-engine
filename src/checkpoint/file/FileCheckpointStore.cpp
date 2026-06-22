@@ -249,6 +249,9 @@ template <typename Enum>
       return cex::runtime::RuntimeCommandKind::MarkPriceUpdated;
     case static_cast<int>(cex::runtime::RuntimeCommandKind::FundingRateUpdated):
       return cex::runtime::RuntimeCommandKind::FundingRateUpdated;
+    case static_cast<int>(
+        cex::runtime::RuntimeCommandKind::FundingSettlementTick):
+      return cex::runtime::RuntimeCommandKind::FundingSettlementTick;
     default:
       throw CheckpointParseError("invalid runtime command kind");
   }
@@ -411,6 +414,13 @@ sorted_funding_rates(
               return left.first < right.first;
             });
   return sorted;
+}
+
+[[nodiscard]] std::vector<cex::runtime::FundingSettlementKey>
+sorted_settled_funding_intervals(
+    const cex::runtime::FundingSettlementSet& entries) {
+  return std::vector<cex::runtime::FundingSettlementKey>(entries.begin(),
+                                                         entries.end());
 }
 
 [[nodiscard]] std::vector<
@@ -704,6 +714,21 @@ void write_funding_rates(
   }
 }
 
+void write_settled_funding_intervals(
+    std::ostream& out,
+    const cex::runtime::FundingSettlementSet& entries) {
+  const auto sorted = sorted_settled_funding_intervals(entries);
+  write_line(out,
+             {"settled_funding_intervals", std::to_string(sorted.size())});
+
+  for (const auto& key : sorted) {
+    write_line(out,
+               {"settled_funding_interval",
+                std::to_string(key.market_id),
+                escape_field(key.funding_interval_id)});
+  }
+}
+
 void write_positions(std::ostream& out,
                      const cex::runtime::IsolatedPositionMap& entries) {
   const auto sorted = sorted_positions(entries);
@@ -791,6 +816,8 @@ void write_checkpoint(std::ostream& out, const EngineCheckpoint& checkpoint) {
 
   write_mark_prices(out, checkpoint.mark_prices);
   write_funding_rates(out, checkpoint.funding_rates);
+  write_settled_funding_intervals(out,
+                                  checkpoint.settled_funding_intervals);
   write_positions(out, checkpoint.positions);
   write_risk_states(out, checkpoint.risk_states);
   write_metadata_store(out, checkpoint);
@@ -859,6 +886,12 @@ class CheckpointReader {
 
     if (!section.empty() && section.front() == "funding_rates") {
       checkpoint.funding_rates = read_funding_rates(section);
+      section = read_fields_any();
+    }
+
+    if (!section.empty() && section.front() == "settled_funding_intervals") {
+      checkpoint.settled_funding_intervals =
+          read_settled_funding_intervals(section);
       section = read_fields_any();
     }
 
@@ -1210,6 +1243,30 @@ class CheckpointReader {
     }
 
     return funding_rates;
+  }
+
+  [[nodiscard]] cex::runtime::FundingSettlementSet
+  read_settled_funding_intervals(
+      const std::vector<std::string>& count_fields) {
+    const std::size_t count =
+        count_from_fields(count_fields, "settled_funding_intervals");
+    cex::runtime::FundingSettlementSet settled;
+
+    for (std::size_t index = 0; index < count; ++index) {
+      const auto fields = read_fields("settled_funding_interval");
+      require_field_count(fields, 3);
+
+      cex::runtime::FundingSettlementKey key{
+          .market_id = parse_integer<cex::adapter::MarketId>(fields[1]),
+          .funding_interval_id = unescape_field(fields[2]),
+      };
+
+      if (!settled.insert(std::move(key)).second) {
+        throw CheckpointParseError("duplicate settled funding interval");
+      }
+    }
+
+    return settled;
   }
 
   [[nodiscard]] cex::runtime::IsolatedPositionMap read_positions(

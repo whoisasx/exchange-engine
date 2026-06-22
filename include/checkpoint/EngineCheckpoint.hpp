@@ -32,6 +32,7 @@ struct EngineCheckpoint {
       mark_prices;
   std::unordered_map<cex::adapter::MarketId, cex::runtime::FundingRateState>
       funding_rates;
+  cex::runtime::FundingSettlementSet settled_funding_intervals;
   cex::runtime::IsolatedPositionMap positions;
   cex::runtime::IsolatedRiskMap risk_states;
   cex::adapter::OrderMetadataStore metadata_store;

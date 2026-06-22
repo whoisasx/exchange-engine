@@ -15,13 +15,15 @@ enum class ParsedEngineInputKind {
   CancelOrder,
   MarkPriceUpdated,
   FundingRateUpdated,
+  FundingSettlementTick,
 };
 
 using ParsedEngineInputValue =
     std::variant<cex::adapter::PlaceOrderInput,
                  cex::adapter::CancelOrderInput,
                  cex::adapter::MarkPriceUpdatedInput,
-                 cex::adapter::FundingRateUpdatedInput>;
+                 cex::adapter::FundingRateUpdatedInput,
+                 cex::adapter::FundingSettlementTickInput>;
 
 struct ParsedEngineInput {
   ParsedEngineInputKind kind{ParsedEngineInputKind::PlaceOrder};
@@ -45,6 +47,9 @@ class EngineInputParser {
       const protocol::ProtocolMessage& message) const;
   [[nodiscard]] cex::adapter::FundingRateUpdatedInput
   parse_funding_rate_updated(const protocol::ProtocolMessage& message) const;
+  [[nodiscard]] cex::adapter::FundingSettlementTickInput
+  parse_funding_settlement_tick(
+      const protocol::ProtocolMessage& message) const;
 };
 
 }  // namespace cex::runtime

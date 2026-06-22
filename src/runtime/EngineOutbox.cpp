@@ -39,6 +39,7 @@ EnginePublishResult EngineOutbox::publish(
     const EngineProcessResult& process_result) const {
   EnginePublishResult result;
   if (process_result.status == EngineProcessStatus::Duplicate ||
+      process_result.status == EngineProcessStatus::Rejected ||
       process_result.empty()) {
     return result;
   }

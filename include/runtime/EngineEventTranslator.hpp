@@ -18,6 +18,7 @@ enum class RuntimeCommandKind {
   CancelOrder,
   MarkPriceUpdated,
   FundingRateUpdated,
+  FundingSettlementTick,
 };
 
 struct EngineEventTranslationContext {

@@ -112,6 +112,14 @@ struct FundingRateUpdatedInput {
   std::optional<BrokerRecordContext> source;
 };
 
+struct FundingSettlementTickInput {
+  std::optional<std::string> input_id;
+  MarketId market_id{0};
+  std::string funding_interval_id;
+  std::int64_t settle_at_ms{0};
+  std::optional<BrokerRecordContext> source;
+};
+
 struct OrderMetadata {
   OrderId order_id{0};
   MarketId market_id{0};
