@@ -313,16 +313,17 @@ struct AdlCandidate {
     }
 
     const auto risk = risk_states.find(key);
+    if (risk == risk_states.end() || risk->second.unrealized_pnl <= 0) {
+      continue;
+    }
+
     candidates.push_back(AdlCandidate{
         .key = key,
         .position = position,
         .available_quantity = abs_quantity(position.signed_quantity),
-        .unrealized_pnl =
-            risk == risk_states.end() ? 0 : risk->second.unrealized_pnl,
-        .leverage = risk == risk_states.end() ? position.leverage
-                                              : risk->second.leverage,
-        .margin_ratio = risk == risk_states.end() ? 0
-                                                  : risk->second.margin_ratio,
+        .unrealized_pnl = risk->second.unrealized_pnl,
+        .leverage = risk->second.leverage,
+        .margin_ratio = risk->second.margin_ratio,
     });
   }
 

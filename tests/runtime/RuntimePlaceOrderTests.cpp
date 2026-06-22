@@ -269,7 +269,8 @@ void assert_position_state(const EngineRuntime& runtime,
                            std::int64_t user_id,
                            std::int64_t signed_quantity,
                            std::int64_t average_entry_price,
-                           std::int64_t isolated_margin) {
+                           std::int64_t isolated_margin,
+                           std::int32_t expected_leverage = 10) {
   const auto it = runtime.positions().find(PositionRiskKey{
       .user_id = user_id,
       .market_id = 1,
@@ -281,7 +282,7 @@ void assert_position_state(const EngineRuntime& runtime,
   assert(it->second.average_entry_price == average_entry_price);
   assert(it->second.margin_asset == "USDC");
   assert(it->second.isolated_margin == isolated_margin);
-  assert(it->second.leverage == 10);
+  assert(it->second.leverage == expected_leverage);
 }
 
 void assert_risk_state(const EngineRuntime& runtime,
@@ -1659,6 +1660,9 @@ void test_runtime_liquidation_residual_book_fill_uses_adl() {
 void test_runtime_liquidation_full_adl_without_book_liquidity() {
   auto runtime = make_runtime();
   open_liquidatable_short_position(runtime);
+  assert(runtime.risk_states()
+             .at(PositionRiskKey{.user_id = 42, .market_id = 1})
+             .unrealized_pnl > 0);
 
   const auto result = runtime.process(make_record(
       liquidation_json("input_liq_full_adl",
@@ -1708,11 +1712,48 @@ void test_runtime_liquidation_full_adl_without_book_liquidity() {
   assert(runtime.market_sequences().peek(1) == 18);
 }
 
+void test_runtime_liquidation_ignores_non_profitable_adl_candidates() {
+  auto runtime = make_runtime();
+  open_liquidatable_short_position(runtime);
+  auto snapshot = runtime.snapshot_state();
+  set_snapshot_position(snapshot, 42, 6, 110, 60);
+  set_snapshot_position(snapshot, 50, 4, 120, 40);
+  runtime.restore_state(snapshot);
+
+  assert(runtime.risk_states()
+             .at(PositionRiskKey{.user_id = 42, .market_id = 1})
+             .unrealized_pnl == 0);
+  assert(runtime.risk_states()
+             .at(PositionRiskKey{.user_id = 50, .market_id = 1})
+             .unrealized_pnl < 0);
+
+  const auto result = runtime.process(make_record(
+      liquidation_json("input_liq_unprofitable_adl",
+                       "req_liq_unprofitable_adl",
+                       "idem-liq-unprofitable-adl",
+                       "liq_unprofitable_adl",
+                       43,
+                       "SHORT",
+                       10,
+                       95),
+      1769));
+  assert(result.status == EngineProcessStatus::Processed);
+  assert(result.replies.size() == 1);
+  assert(result.events.empty());
+  assert(result.replies[0].type == "LiquidationRejected");
+  assert(result.replies[0].payload.at("reason") ==
+         "no liquidation liquidity");
+  assert_position_state(runtime, 42, 6, 110, 60);
+  assert_position_state(runtime, 50, 4, 120, 40);
+  assert_position_state(runtime, 43, -10, 100, 100);
+}
+
 void test_runtime_liquidation_partial_adl_when_opposing_exposure_shortfall() {
   auto runtime = make_runtime();
   open_liquidatable_short_position(runtime);
   auto snapshot = runtime.snapshot_state();
   set_snapshot_position(snapshot, 42, 4, 100, 40);
+  set_snapshot_position(snapshot, 50, 6, 120, 60);
   runtime.restore_state(snapshot);
 
   const auto result = runtime.process(make_record(
@@ -1734,6 +1775,7 @@ void test_runtime_liquidation_partial_adl_when_opposing_exposure_shortfall() {
   assert(adl != nullptr);
   assert(payload_number_text(*adl, "quantity") == "4");
   assert(payload_number_text(*adl, "deleveraged_user_id") == "42");
+  assert((adl_counterparty_order(result) == std::vector<std::int64_t>{42}));
 
   const auto& completed = result.events.back();
   assert(completed.type == "LiquidationCompleted");
@@ -1742,6 +1784,7 @@ void test_runtime_liquidation_partial_adl_when_opposing_exposure_shortfall() {
   assert(payload_number_text(completed, "bad_debt") == "0");
 
   assert_position_state(runtime, 42, 0, 0, 0);
+  assert_position_state(runtime, 50, 6, 120, 60);
   assert_position_state(runtime, 43, -6, 100, 60);
   assert(runtime.risk_states()
              .at(PositionRiskKey{.user_id = 43, .market_id = 1})
@@ -1752,8 +1795,8 @@ void test_runtime_liquidation_adl_ordering_and_idempotency() {
   auto prepared = make_runtime();
   open_liquidatable_short_position(prepared);
   auto snapshot = prepared.snapshot_state();
-  set_snapshot_position(snapshot, 42, 4, 100, 40);
-  set_snapshot_position(snapshot, 50, 6, 80, 60);
+  set_snapshot_position(snapshot, 42, 6, 100, 60, 110, 50);
+  set_snapshot_position(snapshot, 50, 4, 80, 40, 110, 1);
 
   auto runtime_a = make_runtime();
   runtime_a.restore_state(snapshot);
@@ -1768,8 +1811,8 @@ void test_runtime_liquidation_adl_ordering_and_idempotency() {
   const auto first = runtime_a.process(make_record(command, 1772));
   assert(first.status == EngineProcessStatus::Processed);
   assert((adl_counterparty_order(first) == std::vector<std::int64_t>{50, 42}));
-  assert_position_state(runtime_a, 50, 0, 0, 0);
-  assert_position_state(runtime_a, 42, 0, 0, 0);
+  assert_position_state(runtime_a, 50, 0, 0, 0, 1);
+  assert_position_state(runtime_a, 42, 0, 0, 0, 50);
   assert_position_state(runtime_a, 43, 0, 0, 0);
   const auto next_sequence = runtime_a.market_sequences().peek(1);
 
@@ -2276,6 +2319,7 @@ int main() {
     test_liquidation_duplicate_input_and_idempotency_do_not_reapply();
     test_runtime_liquidation_residual_book_fill_uses_adl();
     test_runtime_liquidation_full_adl_without_book_liquidity();
+    test_runtime_liquidation_ignores_non_profitable_adl_candidates();
     test_runtime_liquidation_partial_adl_when_opposing_exposure_shortfall();
     test_runtime_liquidation_adl_ordering_and_idempotency();
     test_replay_silent_resting_order_updates_state_without_outputs();
