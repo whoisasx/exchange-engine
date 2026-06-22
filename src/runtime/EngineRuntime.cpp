@@ -193,6 +193,12 @@ template <typename Value>
   return "FLAT";
 }
 
+[[nodiscard]] bool side_matches_position(cex::adapter::AdapterSide side,
+                                         std::int64_t signed_quantity) {
+  return (side == cex::adapter::AdapterSide::Long && signed_quantity > 0) ||
+         (side == cex::adapter::AdapterSide::Short && signed_quantity < 0);
+}
+
 [[nodiscard]] std::string position_id_text(
     cex::adapter::AdapterUserId user_id,
     cex::adapter::MarketId market_id) {
@@ -318,6 +324,194 @@ void add_runtime_engine_fields(
                                    market_sequences,
                                    clock,
                                    std::move(payload));
+}
+
+[[nodiscard]] EngineOutputRecord make_liquidation_reply(
+    std::string type,
+    const InboundEngineRecord& record,
+    const cex::adapter::LiquidatePositionInput& input,
+    PayloadFields payload) {
+  payload.emplace("request_id", input.envelope.request_id);
+  add_runtime_source_fields(payload, record, input.input_id);
+
+  return EngineOutputRecord{
+      .topic = EngineRepliesTopic,
+      .type = std::move(type),
+      .key = input.envelope.request_id,
+      .partition = input.envelope.reply_partition,
+      .payload = std::move(payload),
+  };
+}
+
+[[nodiscard]] EngineOutputRecord make_liquidation_accepted_reply(
+    const InboundEngineRecord& record,
+    const cex::adapter::LiquidatePositionInput& input,
+    OrderId liquidation_order_id) {
+  PayloadFields payload{
+      {"liquidation_id", input.liquidation_id},
+      {"order_id", number_value(liquidation_order_id)},
+  };
+  return make_liquidation_reply(
+      "LiquidationAccepted", record, input, std::move(payload));
+}
+
+[[nodiscard]] EngineOutputRecord make_liquidation_rejected_reply(
+    const InboundEngineRecord& record,
+    const cex::adapter::LiquidatePositionInput& input,
+    std::string reason) {
+  PayloadFields payload{
+      {"liquidation_id", input.liquidation_id},
+      {"reason", std::move(reason)},
+  };
+  return make_liquidation_reply(
+      "LiquidationRejected", record, input, std::move(payload));
+}
+
+[[nodiscard]] EngineOutputRecord make_liquidation_started_event(
+    const InboundEngineRecord& record,
+    const cex::adapter::LiquidatePositionInput& input,
+    const IsolatedPositionState& position,
+    const IsolatedRiskState& risk,
+    cex::adapter::MarketSequenceGenerator& market_sequences,
+    const EngineRuntimeClock& clock) {
+  PayloadFields payload{
+      {"liquidation_id", input.liquidation_id},
+      {"user_id", number_value(input.liquidated_user_id)},
+      {"position_id", position_id_text(input.liquidated_user_id,
+                                        input.market_id)},
+      {"side", position_side_text(position.signed_quantity)},
+      {"quantity", number_value(abs_quantity(position.signed_quantity))},
+      {"mark_price", number_value(risk.mark_price)},
+      {"maintenance_margin", number_value(risk.maintenance_margin)},
+      {"equity", number_value(risk.equity)},
+      {"reason", "MAINTENANCE_MARGIN_BREACH"},
+  };
+  return make_runtime_market_event("LiquidationStarted",
+                                   input.market_id,
+                                   record,
+                                   input.input_id,
+                                   market_sequences,
+                                   clock,
+                                   std::move(payload));
+}
+
+[[nodiscard]] EngineOutputRecord make_liquidation_executed_event(
+    const InboundEngineRecord& record,
+    const cex::adapter::LiquidatePositionInput& input,
+    const IsolatedPositionState& position,
+    EngineSequence fill_id,
+    cex::adapter::MarketSequenceGenerator& market_sequences,
+    const EngineRuntimeClock& clock) {
+  const auto price = input.price > 0 ? input.price : position.average_entry_price;
+  const auto quantity = input.quantity > 0
+                            ? input.quantity
+                            : abs_quantity(position.signed_quantity);
+  PayloadFields payload{
+      {"liquidation_id", input.liquidation_id},
+      {"user_id", number_value(input.liquidated_user_id)},
+      {"position_id", position_id_text(input.liquidated_user_id,
+                                        input.market_id)},
+      {"fill_id", number_value(fill_id)},
+      {"price", number_value(price)},
+      {"quantity", number_value(quantity)},
+      {"execution_reason", "LIQUIDATION"},
+  };
+  return make_runtime_market_event("LiquidationExecuted",
+                                   input.market_id,
+                                   record,
+                                   input.input_id,
+                                   market_sequences,
+                                   clock,
+                                   std::move(payload));
+}
+
+[[nodiscard]] EngineOutputRecord make_liquidation_position_changed_event(
+    const InboundEngineRecord& record,
+    const cex::adapter::LiquidatePositionInput& input,
+    const IsolatedPositionState& flat_position,
+    const IsolatedRiskState& previous_risk,
+    cex::adapter::MarketSequenceGenerator& market_sequences,
+    const EngineRuntimeClock& clock) {
+  PayloadFields payload{
+      {"user_id", number_value(flat_position.user_id)},
+      {"position_id", position_id_text(flat_position.user_id,
+                                        flat_position.market_id)},
+      {"side", position_side_text(flat_position.signed_quantity)},
+      {"signed_quantity", number_value(flat_position.signed_quantity)},
+      {"quantity", number_value(0)},
+      {"average_entry_price", number_value(flat_position.average_entry_price)},
+      {"entry_price", number_value(flat_position.average_entry_price)},
+      {"mark_price", number_value(previous_risk.mark_price)},
+      {"isolated_margin", number_value(flat_position.isolated_margin)},
+      {"realized_pnl", number_value(previous_risk.unrealized_pnl)},
+      {"unrealized_pnl", number_value(0)},
+      {"maintenance_margin", number_value(0)},
+      {"liquidation_price", number_value(0)},
+      {"reason", "LIQUIDATION"},
+      {"margin_asset", flat_position.margin_asset},
+      {"leverage", number_value(flat_position.leverage)},
+      {"last_fill_quantity", number_value(input.quantity)},
+      {"last_fill_price", number_value(input.price)},
+  };
+  return make_runtime_market_event("PositionChanged",
+                                   flat_position.market_id,
+                                   record,
+                                   input.input_id,
+                                   market_sequences,
+                                   clock,
+                                   std::move(payload));
+}
+
+[[nodiscard]] EngineOutputRecord make_liquidation_completed_event(
+    const InboundEngineRecord& record,
+    const cex::adapter::LiquidatePositionInput& input,
+    cex::adapter::MarketSequenceGenerator& market_sequences,
+    const EngineRuntimeClock& clock) {
+  PayloadFields payload{
+      {"liquidation_id", input.liquidation_id},
+      {"user_id", number_value(input.liquidated_user_id)},
+      {"position_id", position_id_text(input.liquidated_user_id,
+                                        input.market_id)},
+      {"final_status", "FLAT"},
+      {"remaining_quantity", number_value(0)},
+      {"insurance_fund_delta", number_value(0)},
+      {"bad_debt", number_value(0)},
+  };
+  return make_runtime_market_event("LiquidationCompleted",
+                                   input.market_id,
+                                   record,
+                                   input.input_id,
+                                   market_sequences,
+                                   clock,
+                                   std::move(payload));
+}
+
+[[nodiscard]] std::string liquidation_rejection_reason(
+    const cex::adapter::LiquidatePositionInput& input,
+    const IsolatedPositionMap& positions,
+    const IsolatedRiskMap& risk_states) {
+  const PositionRiskKey key{
+      .user_id = input.liquidated_user_id,
+      .market_id = input.market_id,
+  };
+  const auto position = positions.find(key);
+  if (position == positions.end() || position->second.signed_quantity == 0) {
+    return "position is not liquidatable";
+  }
+  if (!side_matches_position(input.position_side,
+                             position->second.signed_quantity)) {
+    return "position side mismatch";
+  }
+
+  const auto risk = risk_states.find(key);
+  if (risk == risk_states.end()) {
+    return "position is not liquidatable";
+  }
+  if (risk->second.status != "LIQUIDATABLE" &&
+      risk->second.equity > risk->second.maintenance_margin) {
+    return "position is not liquidatable";
+  }
+  return {};
 }
 
 [[nodiscard]] EngineProcessResult rejected_no_output() {
@@ -490,6 +684,105 @@ EngineProcessResult EngineRuntime::process(const InboundEngineRecord& record,
     }
     cleanup_completed_order_metadata(metadata_store_, core_events);
     mark_processed(RuntimeCommandKind::PlaceOrder,
+                   record,
+                   input.input_id,
+                   input.envelope.idempotency_key);
+    return apply_processing_mode(std::move(result), mode);
+  }
+
+  if (parsed.kind == ParsedEngineInputKind::LiquidatePosition) {
+    auto input =
+        std::get<cex::adapter::LiquidatePositionInput>(parsed.value);
+    if (auto duplicate = duplicate_result_for(
+            input.input_id, input.envelope.idempotency_key);
+        duplicate.has_value()) {
+      return *duplicate;
+    }
+
+    input.source = broker_context(record);
+
+    EngineProcessResult result;
+    const auto rejection_reason =
+        liquidation_rejection_reason(input, positions_, risk_states_);
+    if (!rejection_reason.empty()) {
+      result.replies.push_back(
+          make_liquidation_rejected_reply(record, input, rejection_reason));
+      mark_processed(RuntimeCommandKind::LiquidatePosition,
+                     record,
+                     input.input_id,
+                     input.envelope.idempotency_key);
+      return apply_processing_mode(std::move(result), mode);
+    }
+
+    const PositionRiskKey key{
+        .user_id = input.liquidated_user_id,
+        .market_id = input.market_id,
+    };
+    const auto previous_position = positions_.at(key);
+    const auto previous_risk = risk_states_.at(key);
+    const auto fill_id = market_sequences_.peek(input.market_id) + 1;
+    const auto liquidation_order_id =
+        static_cast<OrderId>(
+            cex::adapter::command_id_from_request_id(input.liquidation_id));
+
+    result.replies.push_back(make_liquidation_accepted_reply(
+        record, input, liquidation_order_id));
+    result.events.push_back(make_liquidation_started_event(record,
+                                                           input,
+                                                           previous_position,
+                                                           previous_risk,
+                                                           market_sequences_,
+                                                           clock_));
+    result.events.push_back(make_liquidation_executed_event(record,
+                                                            input,
+                                                            previous_position,
+                                                            fill_id,
+                                                            market_sequences_,
+                                                            clock_));
+
+    auto flat_position = previous_position;
+    flat_position.signed_quantity = 0;
+    flat_position.average_entry_price = 0;
+    flat_position.isolated_margin = 0;
+    flat_position.updated_at_ms = clock_ ? clock_() : 0;
+    positions_[key] = flat_position;
+
+    IsolatedRiskState flat_risk{
+        .user_id = input.liquidated_user_id,
+        .market_id = input.market_id,
+        .status = "FLAT",
+        .margin_asset = previous_risk.margin_asset,
+        .signed_quantity = 0,
+        .average_entry_price = 0,
+        .mark_price = previous_risk.mark_price,
+        .isolated_margin = 0,
+        .unrealized_pnl = 0,
+        .equity = 0,
+        .maintenance_margin = 0,
+        .margin_ratio = 0,
+        .leverage = previous_risk.leverage,
+        .updated_at_ms = flat_position.updated_at_ms,
+    };
+    risk_states_[key] = flat_risk;
+
+    result.events.push_back(make_liquidation_position_changed_event(
+        record,
+        input,
+        flat_position,
+        previous_risk,
+        market_sequences_,
+        clock_));
+    result.events.push_back(make_runtime_risk_state_updated_event(record,
+                                                                  input.input_id,
+                                                                  flat_risk,
+                                                                  market_sequences_,
+                                                                  clock_));
+    result.events.push_back(make_liquidation_completed_event(record,
+                                                             input,
+                                                             market_sequences_,
+                                                             clock_));
+
+    mark_processed(RuntimeCommandKind::LiquidatePosition,
                    record,
                    input.input_id,
                    input.envelope.idempotency_key);

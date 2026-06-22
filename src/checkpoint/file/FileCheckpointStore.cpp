@@ -245,6 +245,8 @@ template <typename Enum>
       return cex::runtime::RuntimeCommandKind::PlaceOrder;
     case static_cast<int>(cex::runtime::RuntimeCommandKind::CancelOrder):
       return cex::runtime::RuntimeCommandKind::CancelOrder;
+    case static_cast<int>(cex::runtime::RuntimeCommandKind::LiquidatePosition):
+      return cex::runtime::RuntimeCommandKind::LiquidatePosition;
     case static_cast<int>(cex::runtime::RuntimeCommandKind::MarkPriceUpdated):
       return cex::runtime::RuntimeCommandKind::MarkPriceUpdated;
     case static_cast<int>(cex::runtime::RuntimeCommandKind::FundingRateUpdated):

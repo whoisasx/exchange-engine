@@ -13,6 +13,7 @@ namespace cex::runtime {
 enum class ParsedEngineInputKind {
   PlaceOrder,
   CancelOrder,
+  LiquidatePosition,
   MarkPriceUpdated,
   FundingRateUpdated,
   FundingSettlementTick,
@@ -21,6 +22,7 @@ enum class ParsedEngineInputKind {
 using ParsedEngineInputValue =
     std::variant<cex::adapter::PlaceOrderInput,
                  cex::adapter::CancelOrderInput,
+                 cex::adapter::LiquidatePositionInput,
                  cex::adapter::MarkPriceUpdatedInput,
                  cex::adapter::FundingRateUpdatedInput,
                  cex::adapter::FundingSettlementTickInput>;
@@ -42,6 +44,8 @@ class EngineInputParser {
   [[nodiscard]] cex::adapter::PlaceOrderInput parse_place_order(
       const protocol::ProtocolMessage& message) const;
   [[nodiscard]] cex::adapter::CancelOrderInput parse_cancel_order(
+      const protocol::ProtocolMessage& message) const;
+  [[nodiscard]] cex::adapter::LiquidatePositionInput parse_liquidate_position(
       const protocol::ProtocolMessage& message) const;
   [[nodiscard]] cex::adapter::MarkPriceUpdatedInput parse_mark_price_updated(
       const protocol::ProtocolMessage& message) const;

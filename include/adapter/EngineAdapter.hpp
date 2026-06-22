@@ -87,6 +87,20 @@ struct CancelOrderInput {
   std::optional<BrokerRecordContext> source;
 };
 
+struct LiquidatePositionInput {
+  std::optional<std::string> input_id;
+  CommandEnvelope envelope;
+  std::string liquidation_id;
+  MarketId market_id{0};
+  std::string market_name;
+  AdapterUserId liquidated_user_id{0};
+  AdapterSide position_side{AdapterSide::Long};
+  AdapterQuantity quantity{0};
+  AdapterPrice price{0};
+  std::optional<std::string> request_source;
+  std::optional<BrokerRecordContext> source;
+};
+
 struct MarkPriceUpdatedInput {
   std::optional<std::string> input_id;
   MarketId market_id{0};

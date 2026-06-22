@@ -153,6 +153,17 @@ namespace {
   throw parser_error("payload.side must be LONG or SHORT");
 }
 
+[[nodiscard]] cex::adapter::AdapterSide parse_position_side(
+    std::string_view value) {
+  if (value == "LONG") {
+    return cex::adapter::AdapterSide::Long;
+  }
+  if (value == "SHORT") {
+    return cex::adapter::AdapterSide::Short;
+  }
+  throw parser_error("payload.position_side must be LONG or SHORT");
+}
+
 [[nodiscard]] cex::adapter::AdapterOrderType parse_order_type(
     std::string_view value) {
   if (value == "LIMIT") {
@@ -221,6 +232,12 @@ ParsedEngineInput EngineInputParser::parse(std::string_view raw_json) const {
         .value = parse_cancel_order(message),
     };
   }
+  if (message.type == "LiquidatePosition") {
+    return ParsedEngineInput{
+        .kind = ParsedEngineInputKind::LiquidatePosition,
+        .value = parse_liquidate_position(message),
+    };
+  }
   if (message.type == "MarkPriceUpdated") {
     return ParsedEngineInput{
         .kind = ParsedEngineInputKind::MarkPriceUpdated,
@@ -284,6 +301,31 @@ cex::adapter::CancelOrderInput EngineInputParser::parse_cancel_order(
       .envelope = require_envelope(payload),
       .market_id = require_i64(payload, "market_id", "payload"),
       .order_id = require_i64(payload, "order_id", "payload"),
+      .source = std::nullopt,
+  };
+}
+
+cex::adapter::LiquidatePositionInput
+EngineInputParser::parse_liquidate_position(
+    const protocol::ProtocolMessage& message) const {
+  if (message.type != "LiquidatePosition") {
+    throw parser_error("expected LiquidatePosition message");
+  }
+
+  const auto& payload = message.payload;
+  return cex::adapter::LiquidatePositionInput{
+      .input_id = optional_payload_string(message, "input_id"),
+      .envelope = require_envelope(payload),
+      .liquidation_id = require_payload_string(message, "liquidation_id"),
+      .market_id = require_i64(payload, "market_id", "payload"),
+      .market_name = require_payload_string(message, "market_name"),
+      .liquidated_user_id =
+          require_i64(payload, "liquidated_user_id", "payload"),
+      .position_side =
+          parse_position_side(require_payload_string(message, "position_side")),
+      .quantity = require_i64(payload, "quantity", "payload"),
+      .price = require_i64(payload, "price", "payload"),
+      .request_source = optional_payload_string(message, "request_source"),
       .source = std::nullopt,
   };
 }

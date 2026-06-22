@@ -447,6 +447,47 @@ std::string funding_settlement_tick_json(
   return json.str();
 }
 
+std::string liquidation_json(
+    const std::string& input_id = "input_liq_001",
+    const std::string& request_id = "req_liq_001",
+    const std::string& idempotency_key = "liquidate-001",
+    const std::string& liquidation_id = "liq_001",
+    std::int64_t liquidated_user_id = 43,
+    const std::string& position_side = "SHORT",
+    std::int64_t quantity = 10,
+    std::int64_t price = 95) {
+  std::ostringstream json;
+  json << R"json({
+  "type": "LiquidatePosition",
+  "payload": {
+    "input_id": ")json"
+       << input_id << R"json(",
+    "envelope": {
+      "request_id": ")json"
+       << request_id << R"json(",
+      "idempotency_key": ")json"
+       << idempotency_key << R"json(",
+      "user_id": 0,
+      "reply_partition": 0
+    },
+    "liquidation_id": ")json"
+       << liquidation_id << R"json(",
+    "market_id": 1,
+    "market_name": "SOL-PERP",
+    "liquidated_user_id": )json"
+       << liquidated_user_id << R"json(,
+    "position_side": ")json"
+       << position_side << R"json(",
+    "quantity": )json"
+       << quantity << R"json(,
+    "price": )json"
+       << price << R"json(,
+    "request_source": "KEEPER_HINT"
+  }
+})json";
+  return json.str();
+}
+
 void open_opposite_positions(EngineRuntime& runtime) {
   const auto resting = runtime.process(make_record(
       place_order_json("input_funding_maker_001",
@@ -460,6 +501,34 @@ void open_opposite_positions(EngineRuntime& runtime) {
   assert(crossing.status == EngineProcessStatus::Processed);
   assert_position_state(runtime, 42, 10, 100, 100);
   assert_position_state(runtime, 43, -10, 100, 100);
+}
+
+void open_liquidatable_short_position(EngineRuntime& runtime) {
+  const auto mark = R"json({
+  "type": "MarkPriceUpdated",
+  "payload": {
+    "input_id": "input_mark_liq_before_fill",
+    "market_id": 1,
+    "mark_price": 110,
+    "index_price": 109,
+    "source_timestamp_ms": 1710000000000,
+    "published_at_ms": 1710000000100,
+    "valid_until_ms": 1710000005100,
+    "source_sequence": 45011,
+    "source_status": "VALID"
+  }
+})json";
+  (void)runtime.process(make_record(mark, 1740));
+
+  const auto resting = read_file(
+      std::filesystem::path(PROTOCOL_EXAMPLES_DIR) /
+      "engine-place-order.command.json");
+  (void)runtime.process(make_record(resting, 1741));
+  const auto crossing = runtime.process(make_record(crossing_order_json(), 1742));
+  assert(crossing.status == EngineProcessStatus::Processed);
+  assert(runtime.risk_states()
+             .at(PositionRiskKey{.user_id = 43, .market_id = 1})
+             .equity == 0);
 }
 
 void test_parses_place_order_fixture() {
@@ -488,6 +557,31 @@ void test_parses_place_order_fixture() {
   assert(input.margin_asset == "USDC");
   assert(input.reserved_margin_amount == 100);
   assert(input.leverage == 10);
+}
+
+void test_parses_liquidate_position_fixture() {
+  const auto raw = read_file(
+      std::filesystem::path(PROTOCOL_EXAMPLES_DIR) /
+      "engine-liquidate-position.command.json");
+
+  EngineInputParser parser;
+  const auto parsed = parser.parse(raw);
+  assert(parsed.kind == ParsedEngineInputKind::LiquidatePosition);
+
+  const auto& input =
+      std::get<cex::adapter::LiquidatePositionInput>(parsed.value);
+  assert(input.input_id == "input_liq_001");
+  assert(input.envelope.request_id == "req_liq_001");
+  assert(input.envelope.idempotency_key == "liquidate-001");
+  assert(input.envelope.user_id == 0);
+  assert(input.liquidation_id == "liq_001");
+  assert(input.market_id == 1);
+  assert(input.market_name == "SOL-PERP");
+  assert(input.liquidated_user_id == 42);
+  assert(input.position_side == cex::adapter::AdapterSide::Long);
+  assert(input.quantity == 10);
+  assert(input.price == 0);
+  assert(input.request_source == "KEEPER_HINT");
 }
 
 void test_parses_mark_price_updated_fixture() {
@@ -550,6 +644,36 @@ void test_parses_funding_settlement_tick_fixture() {
   assert(input.funding_interval_id ==
          "funding_SOL-PERP_1710000000_1710028800");
   assert(input.settle_at_ms == 1'710'028'800'000LL);
+}
+
+void test_liquidate_position_validation() {
+  EngineInputParser parser;
+
+  try {
+    (void)parser.parse(R"json({
+  "type": "LiquidatePosition",
+  "payload": {
+    "input_id": "input_liq_bad_side",
+    "envelope": {
+      "request_id": "req_liq_bad_side",
+      "idempotency_key": "liquidate-bad-side",
+      "user_id": 0,
+      "reply_partition": 0
+    },
+    "liquidation_id": "liq_bad_side",
+    "market_id": 1,
+    "market_name": "SOL-PERP",
+    "liquidated_user_id": 42,
+    "position_side": "FLAT",
+    "quantity": 10,
+    "price": 95
+  }
+})json");
+    assert(false);
+  } catch (const EngineInputParserError& error) {
+    assert(std::string(error.what()).find("position_side") !=
+           std::string::npos);
+  }
 }
 
 void test_funding_rate_updated_validation() {
@@ -1156,6 +1280,148 @@ void test_runtime_funding_settlement_missing_or_mismatched_rate_rejected() {
   assert(runtime.settled_funding_intervals().size() == 1);
 }
 
+void test_runtime_liquidation_rejected_for_no_position_or_healthy_risk() {
+  auto no_position_runtime = make_runtime();
+  const auto no_position = no_position_runtime.process(
+      make_record(liquidation_json("input_liq_missing",
+                                   "req_liq_missing",
+                                   "idem-liq-missing",
+                                   "liq_missing"),
+                  1750));
+  assert(no_position.status == EngineProcessStatus::Processed);
+  assert(no_position.replies.size() == 1);
+  assert(no_position.events.empty());
+  assert(no_position.replies[0].type == "LiquidationRejected");
+  assert(no_position.replies[0].payload.at("request_id") == "req_liq_missing");
+  assert(no_position.replies[0].payload.at("source_input_id") ==
+         "input_liq_missing");
+  assert(payload_number_text(no_position.replies[0],
+                             "source_input_offset") == "1750");
+  assert(no_position.replies[0].payload.at("liquidation_id") == "liq_missing");
+  assert(no_position.replies[0].payload.at("reason") ==
+         "position is not liquidatable");
+  assert(no_position_runtime.snapshot_state().processed_input_ids.contains(
+      "input_liq_missing"));
+  assert(no_position_runtime.snapshot_state().processed_idempotency_keys
+             .contains("idem-liq-missing"));
+
+  auto healthy_runtime = make_runtime();
+  open_opposite_positions(healthy_runtime);
+  const auto healthy = healthy_runtime.process(
+      make_record(liquidation_json("input_liq_healthy",
+                                   "req_liq_healthy",
+                                   "idem-liq-healthy",
+                                   "liq_healthy"),
+                  1751));
+  assert(healthy.status == EngineProcessStatus::Processed);
+  assert(healthy.replies.size() == 1);
+  assert(healthy.events.empty());
+  assert(healthy.replies[0].type == "LiquidationRejected");
+  assert(healthy.replies[0].payload.at("reason") ==
+         "position is not liquidatable");
+  assert_position_state(healthy_runtime, 43, -10, 100, 100);
+}
+
+void test_runtime_liquidation_accepted_flattens_state_and_emits_lifecycle() {
+  auto runtime = make_runtime();
+  open_liquidatable_short_position(runtime);
+
+  const auto result =
+      runtime.process(make_record(liquidation_json(), 1752));
+  assert(result.status == EngineProcessStatus::Processed);
+  assert(result.replies.size() == 1);
+  assert(result.events.size() == 5);
+  assert(result.replies[0].type == "LiquidationAccepted");
+  assert(result.replies[0].payload.at("request_id") == "req_liq_001");
+  assert(result.replies[0].payload.at("source_input_id") == "input_liq_001");
+  assert(payload_number_text(result.replies[0], "source_input_offset") ==
+         "1752");
+  assert(result.replies[0].payload.at("liquidation_id") == "liq_001");
+  assert(result.replies[0].payload.at("order_id").as_number() != nullptr);
+
+  assert(result.events[0].type == "LiquidationStarted");
+  assert(payload_number_text(result.events[0], "engine_sequence") == "10");
+  assert(payload_number_text(result.events[0], "user_id") == "43");
+  assert(result.events[0].payload.at("position_id") == "pos_43_1");
+  assert(result.events[0].payload.at("side") == "SHORT");
+  assert(payload_number_text(result.events[0], "quantity") == "10");
+  assert(payload_number_text(result.events[0], "mark_price") == "110");
+  assert(payload_number_text(result.events[0], "maintenance_margin") == "55");
+  assert(payload_number_text(result.events[0], "equity") == "0");
+
+  assert(result.events[1].type == "LiquidationExecuted");
+  assert(payload_number_text(result.events[1], "engine_sequence") == "11");
+  assert(payload_number_text(result.events[1], "fill_id") == "11");
+  assert(payload_number_text(result.events[1], "price") == "95");
+  assert(payload_number_text(result.events[1], "quantity") == "10");
+  assert(result.events[1].payload.at("execution_reason") == "LIQUIDATION");
+
+  assert(result.events[2].type == "PositionChanged");
+  assert(payload_number_text(result.events[2], "engine_sequence") == "12");
+  assert(result.events[2].payload.at("side") == "FLAT");
+  assert(payload_number_text(result.events[2], "signed_quantity") == "0");
+  assert(payload_number_text(result.events[2], "quantity") == "0");
+  assert(payload_number_text(result.events[2], "isolated_margin") == "0");
+  assert(payload_number_text(result.events[2], "realized_pnl") == "-100");
+  assert(result.events[2].payload.at("reason") == "LIQUIDATION");
+
+  assert(result.events[3].type == "RiskStateUpdated");
+  assert(payload_number_text(result.events[3], "engine_sequence") == "13");
+  assert(result.events[3].payload.at("status") == "FLAT");
+  assert(payload_number_text(result.events[3], "quantity") == "0");
+  assert(payload_number_text(result.events[3], "equity") == "0");
+  assert(payload_number_text(result.events[3], "maintenance_margin") == "0");
+
+  assert(result.events[4].type == "LiquidationCompleted");
+  assert(payload_number_text(result.events[4], "engine_sequence") == "14");
+  assert(result.events[4].payload.at("final_status") == "FLAT");
+  assert(payload_number_text(result.events[4], "remaining_quantity") == "0");
+  assert(payload_number_text(result.events[4], "insurance_fund_delta") == "0");
+  assert(payload_number_text(result.events[4], "bad_debt") == "0");
+
+  const auto key = PositionRiskKey{.user_id = 43, .market_id = 1};
+  assert(runtime.positions().at(key).signed_quantity == 0);
+  assert(runtime.positions().at(key).isolated_margin == 0);
+  assert(runtime.risk_states().at(key).status == "FLAT");
+  assert(runtime.risk_states().at(key).equity == 0);
+  assert(runtime.market_sequences().peek(1) == 15);
+}
+
+void test_liquidation_duplicate_input_and_idempotency_do_not_reapply() {
+  auto runtime = make_runtime();
+  open_liquidatable_short_position(runtime);
+
+  const auto first =
+      runtime.process(make_record(liquidation_json(), 1760));
+  assert(first.status == EngineProcessStatus::Processed);
+  assert(first.events.size() == 5);
+  assert(runtime.market_sequences().peek(1) == 15);
+
+  const auto same_input =
+      runtime.process(make_record(liquidation_json(), 1761));
+  assert_duplicate_result(same_input,
+                          EngineDuplicateReason::InputId,
+                          "input_liq_001",
+                          1760,
+                          "input_liq_001");
+  assert(runtime.market_sequences().peek(1) == 15);
+
+  const auto same_idempotency = runtime.process(
+      make_record(liquidation_json("input_liq_002",
+                                   "req_liq_002",
+                                   "liquidate-001",
+                                   "liq_002"),
+                  1762));
+  assert_duplicate_result(same_idempotency,
+                          EngineDuplicateReason::IdempotencyKey,
+                          "liquidate-001",
+                          1760,
+                          "input_liq_001");
+  assert(runtime.positions()
+             .at(PositionRiskKey{.user_id = 43, .market_id = 1})
+             .signed_quantity == 0);
+}
+
 void test_replay_silent_resting_order_updates_state_without_outputs() {
   auto runtime = make_runtime();
   const auto raw = read_file(
@@ -1186,6 +1452,32 @@ void test_replay_silent_resting_order_updates_state_without_outputs() {
                           "input_place_001");
   assert(restored.market_sequences().peek(1) == 3);
   assert_book_has_order(restored, 9001);
+}
+
+void test_replay_silent_liquidation_flattens_state_without_outputs() {
+  auto runtime = make_runtime();
+  open_liquidatable_short_position(runtime);
+
+  const auto result = runtime.process_replay(
+      make_record(liquidation_json(), 1770));
+  assert(result.status == EngineProcessStatus::Processed);
+  assert(result.empty());
+  assert(runtime.market_sequences().peek(1) == 15);
+  const auto key = PositionRiskKey{.user_id = 43, .market_id = 1};
+  assert(runtime.positions().at(key).signed_quantity == 0);
+  assert(runtime.risk_states().at(key).status == "FLAT");
+
+  auto restored = make_runtime();
+  restored.restore_state(runtime.snapshot_state());
+  const auto duplicate = restored.process_replay(
+      make_record(liquidation_json(), 1771));
+  assert_duplicate_result(duplicate,
+                          EngineDuplicateReason::InputId,
+                          "input_liq_001",
+                          1770,
+                          "input_liq_001");
+  assert(restored.market_sequences().peek(1) == 15);
+  assert(restored.risk_states().at(key).status == "FLAT");
 }
 
 void test_replay_silent_crossing_order_updates_state_without_outputs() {
@@ -1587,9 +1879,11 @@ void test_outbox_reports_publish_failures() {
 int main() {
   try {
     test_parses_place_order_fixture();
+    test_parses_liquidate_position_fixture();
     test_parses_mark_price_updated_fixture();
     test_parses_funding_rate_updated_fixture();
     test_parses_funding_settlement_tick_fixture();
+    test_liquidate_position_validation();
     test_funding_rate_updated_validation();
     test_funding_settlement_tick_validation();
     test_runtime_resting_limit_order();
@@ -1601,7 +1895,11 @@ int main() {
     test_runtime_funding_settlement_applies_payments_and_updates_risk();
     test_runtime_funding_settlement_duplicate_input_and_interval_noop();
     test_runtime_funding_settlement_missing_or_mismatched_rate_rejected();
+    test_runtime_liquidation_rejected_for_no_position_or_healthy_risk();
+    test_runtime_liquidation_accepted_flattens_state_and_emits_lifecycle();
+    test_liquidation_duplicate_input_and_idempotency_do_not_reapply();
     test_replay_silent_resting_order_updates_state_without_outputs();
+    test_replay_silent_liquidation_flattens_state_without_outputs();
     test_replay_silent_crossing_order_updates_state_without_outputs();
     test_replay_silent_mark_price_updates_state_without_outputs();
     test_replay_silent_funding_rate_updates_state_without_outputs();
