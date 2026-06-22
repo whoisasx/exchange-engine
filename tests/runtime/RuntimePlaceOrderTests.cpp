@@ -115,8 +115,12 @@ const EngineOutputRecord* find_record(
 std::string payload_number_text(const EngineOutputRecord& record,
                                 const std::string& field) {
   const auto* value = record.payload.at(field).as_number();
-  assert(value != nullptr);
-  return value->text;
+  if (value != nullptr) {
+    return value->text;
+  }
+  const auto* text = record.payload.at(field).as_string();
+  assert(text != nullptr);
+  return *text;
 }
 
 void assert_book_has_order(const EngineRuntime& runtime, OrderId order_id) {
@@ -292,7 +296,6 @@ void assert_risk_state(const EngineRuntime& runtime,
   assert(it != runtime.risk_states().end());
   assert(it->second.user_id == user_id);
   assert(it->second.market_id == 1);
-  assert(it->second.status == "HEALTHY");
   assert(it->second.signed_quantity == signed_quantity);
   assert(it->second.average_entry_price == 100);
   assert(it->second.mark_price == mark_price);
@@ -305,6 +308,11 @@ void assert_risk_state(const EngineRuntime& runtime,
   assert(it->second.maintenance_margin == maintenance_margin);
   assert(it->second.margin_ratio ==
          (maintenance_margin == 0 ? 0 : (equity * 10'000) / maintenance_margin));
+  const std::string expected_status =
+      signed_quantity == 0
+          ? "FLAT"
+          : (equity <= maintenance_margin ? "LIQUIDATABLE" : "HEALTHY");
+  assert(it->second.status == expected_status);
   assert(it->second.margin_asset == "USDC");
   assert(it->second.isolated_margin == 100);
   assert(it->second.leverage == 10);
@@ -399,6 +407,49 @@ std::string crossing_order_json() {
     "leverage": 10
   }
 })json";
+}
+
+std::string liquidation_ask_liquidity_json(
+    const std::string& input_id,
+    const std::string& request_id,
+    const std::string& idempotency_key,
+    std::int64_t order_id,
+    const std::string& reservation_id,
+    std::int64_t quantity = 10,
+    std::int64_t price = 95) {
+  std::ostringstream json;
+  json << R"json({
+  "type": "PlaceOrder",
+  "payload": {
+    "input_id": ")json"
+       << input_id << R"json(",
+    "envelope": {
+      "request_id": ")json"
+       << request_id << R"json(",
+      "idempotency_key": ")json"
+       << idempotency_key << R"json(",
+      "user_id": 44,
+      "reply_partition": 0
+    },
+    "reservation_id": ")json"
+       << reservation_id << R"json(",
+    "order_id": )json"
+       << order_id << R"json(,
+    "market_id": 1,
+    "market_name": "SOL-PERP",
+    "side": "SHORT",
+    "order_type": "LIMIT",
+    "quantity": )json"
+       << quantity << R"json(,
+    "price": )json"
+       << price << R"json(,
+    "reduce_only": false,
+    "margin_asset": "USDC",
+    "reserved_margin_amount": 100,
+    "leverage": 10
+  }
+})json";
+  return json.str();
 }
 
 std::string funding_rate_settlement_json(
@@ -1320,27 +1371,50 @@ void test_runtime_liquidation_rejected_for_no_position_or_healthy_risk() {
   assert(healthy.replies[0].payload.at("reason") ==
          "position is not liquidatable");
   assert_position_state(healthy_runtime, 43, -10, 100, 100);
+
+  auto no_liquidity_runtime = make_runtime();
+  open_liquidatable_short_position(no_liquidity_runtime);
+  const auto no_liquidity = no_liquidity_runtime.process(
+      make_record(liquidation_json("input_liq_no_liquidity",
+                                   "req_liq_no_liquidity",
+                                   "idem-liq-no-liquidity",
+                                   "liq_no_liquidity"),
+                  1752));
+  assert(no_liquidity.status == EngineProcessStatus::Processed);
+  assert(no_liquidity.replies.size() == 1);
+  assert(no_liquidity.events.empty());
+  assert(no_liquidity.replies[0].type == "LiquidationRejected");
+  assert(no_liquidity.replies[0].payload.at("reason") ==
+         "no liquidation liquidity");
+  assert_position_state(no_liquidity_runtime, 43, -10, 100, 100);
 }
 
 void test_runtime_liquidation_accepted_flattens_state_and_emits_lifecycle() {
   auto runtime = make_runtime();
   open_liquidatable_short_position(runtime);
+  const auto liquidity = runtime.process(make_record(
+      liquidation_ask_liquidity_json("input_liq_ask_full",
+                                     "req_liq_ask_full",
+                                     "idem-liq-ask-full",
+                                     9201,
+                                     "res_liq_ask_full"),
+      1752));
+  assert(liquidity.status == EngineProcessStatus::Processed);
 
   const auto result =
-      runtime.process(make_record(liquidation_json(), 1752));
+      runtime.process(make_record(liquidation_json(), 1753));
   assert(result.status == EngineProcessStatus::Processed);
   assert(result.replies.size() == 1);
-  assert(result.events.size() == 5);
+  assert(result.events.size() == 9);
   assert(result.replies[0].type == "LiquidationAccepted");
   assert(result.replies[0].payload.at("request_id") == "req_liq_001");
   assert(result.replies[0].payload.at("source_input_id") == "input_liq_001");
-  assert(payload_number_text(result.replies[0], "source_input_offset") ==
-         "1752");
+  assert(result.replies[0].payload.at("source_input_offset") == "1753");
   assert(result.replies[0].payload.at("liquidation_id") == "liq_001");
-  assert(result.replies[0].payload.at("order_id").as_number() != nullptr);
+  assert(result.replies[0].payload.at("order_id").as_string() != nullptr);
 
   assert(result.events[0].type == "LiquidationStarted");
-  assert(payload_number_text(result.events[0], "engine_sequence") == "10");
+  assert(payload_number_text(result.events[0], "engine_sequence") == "12");
   assert(payload_number_text(result.events[0], "user_id") == "43");
   assert(result.events[0].payload.at("position_id") == "pos_43_1");
   assert(result.events[0].payload.at("side") == "SHORT");
@@ -1349,53 +1423,84 @@ void test_runtime_liquidation_accepted_flattens_state_and_emits_lifecycle() {
   assert(payload_number_text(result.events[0], "maintenance_margin") == "55");
   assert(payload_number_text(result.events[0], "equity") == "0");
 
-  assert(result.events[1].type == "LiquidationExecuted");
-  assert(payload_number_text(result.events[1], "engine_sequence") == "11");
-  assert(payload_number_text(result.events[1], "fill_id") == "11");
+  assert(result.events[1].type == "TradeExecuted");
+  assert(payload_number_text(result.events[1], "engine_sequence") == "13");
+  assert(payload_number_text(result.events[1], "fill_id") == "2");
   assert(payload_number_text(result.events[1], "price") == "95");
   assert(payload_number_text(result.events[1], "quantity") == "10");
   assert(result.events[1].payload.at("execution_reason") == "LIQUIDATION");
+  assert(result.events[1].payload.at("liquidation_id") == "liq_001");
+  assert(payload_number_text(result.events[1], "liquidated_user_id") == "43");
+  assert(result.events[1].payload.at("position_side") == "SHORT");
+  assert(payload_number_text(result.events[1], "liquidation_fee") == "4");
+  assert(result.events[1].payload.at("maker_reservation_id") ==
+         "res_liq_ask_full");
+  const auto trade_message = parse_serialized_output(result.events[1]);
+  assert(payload_array(trade_message, "fee_deltas").size() == 1);
+  assert(payload_array(trade_message, "settlements").size() == 1);
 
-  assert(result.events[2].type == "PositionChanged");
-  assert(payload_number_text(result.events[2], "engine_sequence") == "12");
-  assert(result.events[2].payload.at("side") == "FLAT");
-  assert(payload_number_text(result.events[2], "signed_quantity") == "0");
-  assert(payload_number_text(result.events[2], "quantity") == "0");
-  assert(payload_number_text(result.events[2], "isolated_margin") == "0");
-  assert(payload_number_text(result.events[2], "realized_pnl") == "-100");
-  assert(result.events[2].payload.at("reason") == "LIQUIDATION");
+  assert(result.events[2].type == "LiquidationExecuted");
+  assert(payload_number_text(result.events[2], "engine_sequence") == "14");
+  assert(payload_number_text(result.events[2], "fill_id") == "2");
+  assert(payload_number_text(result.events[2], "liquidation_fee") == "4");
 
-  assert(result.events[3].type == "RiskStateUpdated");
-  assert(payload_number_text(result.events[3], "engine_sequence") == "13");
-  assert(result.events[3].payload.at("status") == "FLAT");
-  assert(payload_number_text(result.events[3], "quantity") == "0");
-  assert(payload_number_text(result.events[3], "equity") == "0");
-  assert(payload_number_text(result.events[3], "maintenance_margin") == "0");
+  assert(result.events[3].type == "PositionChanged");
+  assert(payload_number_text(result.events[3], "engine_sequence") == "15");
+  assert(payload_number_text(result.events[3], "user_id") == "44");
+  assert(result.events[3].payload.at("side") == "SHORT");
+  assert(result.events[3].payload.at("reason") == "LIQUIDATION");
 
-  assert(result.events[4].type == "LiquidationCompleted");
-  assert(payload_number_text(result.events[4], "engine_sequence") == "14");
-  assert(result.events[4].payload.at("final_status") == "FLAT");
-  assert(payload_number_text(result.events[4], "remaining_quantity") == "0");
-  assert(payload_number_text(result.events[4], "insurance_fund_delta") == "0");
-  assert(payload_number_text(result.events[4], "bad_debt") == "0");
+  assert(result.events[5].type == "PositionChanged");
+  assert(payload_number_text(result.events[5], "engine_sequence") == "17");
+  assert(payload_number_text(result.events[5], "user_id") == "43");
+  assert(result.events[5].payload.at("side") == "FLAT");
+  assert(payload_number_text(result.events[5], "signed_quantity") == "0");
+  assert(payload_number_text(result.events[5], "quantity") == "0");
+  assert(payload_number_text(result.events[5], "isolated_margin") == "0");
+  assert(result.events[5].payload.at("reason") == "LIQUIDATION");
+
+  assert(result.events[6].type == "RiskStateUpdated");
+  assert(payload_number_text(result.events[6], "engine_sequence") == "18");
+  assert(result.events[6].payload.at("status") == "FLAT");
+  assert(payload_number_text(result.events[6], "quantity") == "0");
+  assert(payload_number_text(result.events[6], "equity") == "0");
+  assert(payload_number_text(result.events[6], "maintenance_margin") == "0");
+
+  assert(result.events[7].type == "OrderBookDelta");
+  assert(payload_number_text(result.events[7], "engine_sequence") == "19");
+
+  assert(result.events[8].type == "LiquidationCompleted");
+  assert(payload_number_text(result.events[8], "engine_sequence") == "20");
+  assert(result.events[8].payload.at("final_status") == "FLAT");
+  assert(payload_number_text(result.events[8], "remaining_quantity") == "0");
+  assert(payload_number_text(result.events[8], "insurance_fund_delta") == "0");
+  assert(payload_number_text(result.events[8], "bad_debt") == "0");
 
   const auto key = PositionRiskKey{.user_id = 43, .market_id = 1};
   assert(runtime.positions().at(key).signed_quantity == 0);
   assert(runtime.positions().at(key).isolated_margin == 0);
   assert(runtime.risk_states().at(key).status == "FLAT");
   assert(runtime.risk_states().at(key).equity == 0);
-  assert(runtime.market_sequences().peek(1) == 15);
+  assert(runtime.market_sequences().peek(1) == 21);
+  assert(runtime.metadata_store().find(9201) == nullptr);
 }
 
 void test_liquidation_duplicate_input_and_idempotency_do_not_reapply() {
   auto runtime = make_runtime();
   open_liquidatable_short_position(runtime);
+  (void)runtime.process(make_record(
+      liquidation_ask_liquidity_json("input_liq_dup_ask",
+                                     "req_liq_dup_ask",
+                                     "idem-liq-dup-ask",
+                                     9202,
+                                     "res_liq_dup_ask"),
+      1759));
 
   const auto first =
       runtime.process(make_record(liquidation_json(), 1760));
   assert(first.status == EngineProcessStatus::Processed);
-  assert(first.events.size() == 5);
-  assert(runtime.market_sequences().peek(1) == 15);
+  assert(first.events.size() == 9);
+  assert(runtime.market_sequences().peek(1) == 21);
 
   const auto same_input =
       runtime.process(make_record(liquidation_json(), 1761));
@@ -1404,7 +1509,7 @@ void test_liquidation_duplicate_input_and_idempotency_do_not_reapply() {
                           "input_liq_001",
                           1760,
                           "input_liq_001");
-  assert(runtime.market_sequences().peek(1) == 15);
+  assert(runtime.market_sequences().peek(1) == 21);
 
   const auto same_idempotency = runtime.process(
       make_record(liquidation_json("input_liq_002",
@@ -1420,6 +1525,49 @@ void test_liquidation_duplicate_input_and_idempotency_do_not_reapply() {
   assert(runtime.positions()
              .at(PositionRiskKey{.user_id = 43, .market_id = 1})
              .signed_quantity == 0);
+}
+
+void test_runtime_liquidation_partial_keeps_remaining_position() {
+  auto runtime = make_runtime();
+  open_liquidatable_short_position(runtime);
+  (void)runtime.process(make_record(
+      liquidation_ask_liquidity_json("input_liq_ask_partial",
+                                     "req_liq_ask_partial",
+                                     "idem-liq-ask-partial",
+                                     9203,
+                                     "res_liq_ask_partial",
+                                     4,
+                                     95),
+      1765));
+
+  const auto result = runtime.process(make_record(
+      liquidation_json("input_liq_partial",
+                       "req_liq_partial",
+                       "idem-liq-partial",
+                       "liq_partial",
+                       43,
+                       "SHORT",
+                       10,
+                       95),
+      1766));
+  assert(result.status == EngineProcessStatus::Processed);
+  assert(result.replies.size() == 1);
+  assert(result.replies[0].type == "LiquidationAccepted");
+  assert(result.events.size() == 9);
+  const auto* trade = find_record(result.events, "TradeExecuted");
+  assert(trade != nullptr);
+  assert(payload_number_text(*trade, "quantity") == "4");
+  assert(trade->payload.at("execution_reason") == "LIQUIDATION");
+
+  const auto& completed = result.events.back();
+  assert(completed.type == "LiquidationCompleted");
+  assert(completed.payload.at("final_status") == "PARTIAL");
+  assert(payload_number_text(completed, "remaining_quantity") == "6");
+  assert(payload_number_text(completed, "bad_debt") == "0");
+
+  const auto key = PositionRiskKey{.user_id = 43, .market_id = 1};
+  assert(runtime.positions().at(key).signed_quantity == -6);
+  assert(runtime.risk_states().at(key).signed_quantity == -6);
 }
 
 void test_replay_silent_resting_order_updates_state_without_outputs() {
@@ -1457,12 +1605,19 @@ void test_replay_silent_resting_order_updates_state_without_outputs() {
 void test_replay_silent_liquidation_flattens_state_without_outputs() {
   auto runtime = make_runtime();
   open_liquidatable_short_position(runtime);
+  (void)runtime.process_replay(make_record(
+      liquidation_ask_liquidity_json("input_liq_replay_ask",
+                                     "req_liq_replay_ask",
+                                     "idem-liq-replay-ask",
+                                     9204,
+                                     "res_liq_replay_ask"),
+      1769));
 
   const auto result = runtime.process_replay(
       make_record(liquidation_json(), 1770));
   assert(result.status == EngineProcessStatus::Processed);
   assert(result.empty());
-  assert(runtime.market_sequences().peek(1) == 15);
+  assert(runtime.market_sequences().peek(1) == 21);
   const auto key = PositionRiskKey{.user_id = 43, .market_id = 1};
   assert(runtime.positions().at(key).signed_quantity == 0);
   assert(runtime.risk_states().at(key).status == "FLAT");
@@ -1476,7 +1631,7 @@ void test_replay_silent_liquidation_flattens_state_without_outputs() {
                           "input_liq_001",
                           1770,
                           "input_liq_001");
-  assert(restored.market_sequences().peek(1) == 15);
+  assert(restored.market_sequences().peek(1) == 21);
   assert(restored.risk_states().at(key).status == "FLAT");
 }
 
@@ -1898,6 +2053,7 @@ int main() {
     test_runtime_liquidation_rejected_for_no_position_or_healthy_risk();
     test_runtime_liquidation_accepted_flattens_state_and_emits_lifecycle();
     test_liquidation_duplicate_input_and_idempotency_do_not_reapply();
+    test_runtime_liquidation_partial_keeps_remaining_position();
     test_replay_silent_resting_order_updates_state_without_outputs();
     test_replay_silent_liquidation_flattens_state_without_outputs();
     test_replay_silent_crossing_order_updates_state_without_outputs();

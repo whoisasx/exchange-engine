@@ -32,6 +32,10 @@ struct EngineEventTranslationContext {
   cex::adapter::MarketId market_id{0};
   bool can_open_resting_order{false};
   std::optional<cex::adapter::OrderMetadata> pending_metadata;
+  std::string liquidation_id;
+  cex::adapter::AdapterUserId liquidated_user_id{0};
+  cex::adapter::AdapterSide liquidation_position_side{
+      cex::adapter::AdapterSide::Long};
 };
 
 struct PositionRiskKey {

@@ -19,6 +19,10 @@ template <typename Value>
   return side == Buy ? "LONG" : "SHORT";
 }
 
+[[nodiscard]] std::string adapter_side_text(cex::adapter::AdapterSide side) {
+  return side == cex::adapter::AdapterSide::Long ? "LONG" : "SHORT";
+}
+
 [[nodiscard]] std::string position_side_text(std::int64_t signed_quantity) {
   if (signed_quantity > 0) {
     return "LONG";
@@ -56,6 +60,18 @@ template <typename Value>
     return 0;
   }
   return (equity * 10'000) / maintenance_margin;
+}
+
+[[nodiscard]] std::string risk_status_for(std::int64_t signed_quantity,
+                                          std::int64_t equity,
+                                          std::int64_t maintenance_margin) {
+  if (signed_quantity == 0) {
+    return "FLAT";
+  }
+  if (equity <= maintenance_margin) {
+    return "LIQUIDATABLE";
+  }
+  return "HEALTHY";
 }
 
 [[nodiscard]] bool same_direction(std::int64_t left, std::int64_t right) {
@@ -198,6 +214,22 @@ void add_engine_fields(PayloadFields& payload,
   return (price * fill_quantity) / leverage;
 }
 
+[[nodiscard]] std::int64_t preview_fill_margin(
+    const cex::adapter::OrderMetadata& metadata,
+    std::int64_t fill_quantity,
+    cex::adapter::AdapterPrice price) {
+  const auto original_quantity = metadata.original_quantity;
+  if (metadata.reserved_margin_amount > 0 && original_quantity > 0) {
+    auto allocated =
+        (metadata.reserved_margin_amount * fill_quantity) / original_quantity;
+    if (allocated > metadata.remaining_reserved_margin) {
+      allocated = metadata.remaining_reserved_margin;
+    }
+    return allocated;
+  }
+  return fallback_margin(metadata, fill_quantity, price);
+}
+
 [[nodiscard]] std::int64_t allocate_fill_margin(
     cex::adapter::OrderMetadata& metadata,
     std::int64_t fill_quantity,
@@ -305,7 +337,9 @@ void apply_position_fill(IsolatedPositionState& position,
   return IsolatedRiskState{
       .user_id = position.user_id,
       .market_id = position.market_id,
-      .status = position.signed_quantity == 0 ? "FLAT" : "HEALTHY",
+      .status = risk_status_for(position.signed_quantity,
+                                equity,
+                                maintenance_margin),
       .margin_asset = position.margin_asset,
       .signed_quantity = position.signed_quantity,
       .average_entry_price = position.average_entry_price,
@@ -318,6 +352,13 @@ void apply_position_fill(IsolatedPositionState& position,
       .leverage = position.leverage,
       .updated_at_ms = timestamp_ms,
   };
+}
+
+[[nodiscard]] const char* fill_reason_text(
+    const EngineEventTranslationContext& context) {
+  return context.command_kind == RuntimeCommandKind::LiquidatePosition
+             ? "LIQUIDATION"
+             : "TRADE";
 }
 
 [[nodiscard]] EngineOutputRecord make_position_changed_event(
@@ -346,7 +387,7 @@ void apply_position_fill(IsolatedPositionState& position,
       {"unrealized_pnl", number_value(unrealized_pnl)},
       {"maintenance_margin", number_value(maintenance_margin)},
       {"liquidation_price", number_value(0)},
-      {"reason", "TRADE"},
+      {"reason", fill_reason_text(context)},
       {"margin_asset", position.margin_asset},
       {"leverage", number_value(position.leverage)},
       {"last_fill_quantity", number_value(fill_quantity)},
@@ -459,13 +500,19 @@ void append_order_accepted(
   const auto* metadata = find_metadata(accepted.orderId, context, metadata_store);
 
   PayloadFields reply_payload{{"order_id", text(accepted.orderId)}};
+  std::string reply_type = "OrderAccepted";
+  if (context.command_kind == RuntimeCommandKind::LiquidatePosition) {
+    reply_type = "LiquidationAccepted";
+    reply_payload.emplace("liquidation_id", context.liquidation_id);
+  }
   if (metadata != nullptr) {
     reply_payload.emplace("reservation_id", metadata->reservation_id);
   }
   result.replies.push_back(
-      make_reply("OrderAccepted", context, std::move(reply_payload)));
+      make_reply(std::move(reply_type), context, std::move(reply_payload)));
 
-  if (!context.can_open_resting_order || filled.contains(accepted.orderId)) {
+  if (context.command_kind == RuntimeCommandKind::LiquidatePosition ||
+      !context.can_open_resting_order || filled.contains(accepted.orderId)) {
     return;
   }
 
@@ -505,10 +552,92 @@ void append_order_rejected(EngineProcessResult& result,
     payload.emplace("reservation_id", metadata->reservation_id);
   }
 
-  const char* reply_type =
-      context.command_kind == RuntimeCommandKind::CancelOrder ? "CancelRejected"
-                                                             : "OrderRejected";
+  const char* reply_type = "OrderRejected";
+  if (context.command_kind == RuntimeCommandKind::CancelOrder) {
+    reply_type = "CancelRejected";
+  } else if (context.command_kind == RuntimeCommandKind::LiquidatePosition) {
+    reply_type = "LiquidationRejected";
+    payload.emplace("liquidation_id", context.liquidation_id);
+  }
   result.replies.push_back(make_reply(reply_type, context, std::move(payload)));
+}
+
+[[nodiscard]] std::string settlement_asset_for(
+    const cex::adapter::OrderMetadata* metadata) {
+  if (metadata == nullptr || metadata->margin_asset.empty()) {
+    return "USDC";
+  }
+  return metadata->margin_asset;
+}
+
+[[nodiscard]] std::int64_t liquidation_fee_for(
+    const TradeExecuted& trade) {
+  return (trade.price.ticks() *
+          static_cast<std::int64_t>(trade.quantity.lots())) /
+         200;
+}
+
+[[nodiscard]] PayloadValue::Array liquidation_fee_deltas(
+    const TradeExecuted& trade,
+    const cex::adapter::OrderMetadata* taker,
+    const EngineEventTranslationContext& context) {
+  return PayloadValue::Array{
+      PayloadValue::object(PayloadValue::Object{
+          {"user_id", number_value(context.liquidated_user_id)},
+          {"asset", settlement_asset_for(taker)},
+          {"amount", number_value(-liquidation_fee_for(trade))},
+          {"reason", "LIQUIDATION_FEE"},
+      })};
+}
+
+[[nodiscard]] PayloadValue::Array liquidation_settlements(
+    const TradeExecuted& trade,
+    const cex::adapter::OrderMetadata* maker) {
+  PayloadValue::Array settlements;
+  if (maker == nullptr || maker->reservation_id.empty()) {
+    return settlements;
+  }
+
+  const auto asset = settlement_asset_for(maker);
+  const auto margin = preview_fill_margin(
+      *maker,
+      static_cast<std::int64_t>(trade.quantity.lots()),
+      trade.price.ticks());
+  settlements.push_back(PayloadValue::object(PayloadValue::Object{
+      {"reservation_id", maker->reservation_id},
+      {"debit_asset", asset},
+      {"debit_amount", number_value(margin)},
+      {"credit_asset", asset},
+      {"credit_amount", number_value(margin)},
+  }));
+  return settlements;
+}
+
+[[nodiscard]] EngineOutputRecord make_liquidation_executed_event(
+    const TradeExecuted& trade,
+    const EngineEventTranslationContext& context,
+    const cex::adapter::OrderMetadata* taker,
+    cex::adapter::MarketSequenceGenerator& market_sequences,
+    const EngineRuntimeClock& clock) {
+  PayloadFields payload{
+      {"liquidation_id", context.liquidation_id},
+      {"fill_id", number_value(trade.tradeId)},
+      {"trade_id", number_value(trade.tradeId)},
+      {"price", number_value(trade.price.ticks())},
+      {"quantity", number_value(trade.quantity.lots())},
+      {"execution_reason", "LIQUIDATION"},
+      {"liquidated_user_id", number_value(context.liquidated_user_id)},
+      {"user_id", number_value(context.liquidated_user_id)},
+      {"position_side", adapter_side_text(context.liquidation_position_side)},
+      {"liquidation_fee", number_value(liquidation_fee_for(trade))},
+      {"fee_asset", settlement_asset_for(taker)},
+  };
+  return make_event("LiquidationExecuted",
+                    static_cast<cex::adapter::MarketId>(trade.symbolId),
+                    context,
+                    market_sequences,
+                    clock,
+                    std::move(payload));
 }
 
 void append_trade_executed(
@@ -524,6 +653,8 @@ void append_trade_executed(
     const EngineRuntimeClock& clock) {
   const auto* maker = find_metadata(trade.makerOrderId, context, metadata_store);
   const auto* taker = find_metadata(trade.takerOrderId, context, metadata_store);
+  const bool is_liquidation =
+      context.command_kind == RuntimeCommandKind::LiquidatePosition;
 
   PayloadFields payload{
       {"trade_id", text(trade.tradeId)},
@@ -532,9 +663,15 @@ void append_trade_executed(
       {"quantity", text(trade.quantity.lots())},
       {"maker_order_id", text(trade.makerOrderId)},
       {"taker_order_id", text(trade.takerOrderId)},
-      {"execution_reason", "TRADE"},
-      {"fee_deltas", PayloadValue::array(PayloadValue::Array{})},
-      {"settlements", PayloadValue::array(PayloadValue::Array{})},
+      {"execution_reason", is_liquidation ? "LIQUIDATION" : "TRADE"},
+      {"fee_deltas",
+       PayloadValue::array(is_liquidation
+                               ? liquidation_fee_deltas(trade, taker, context)
+                               : PayloadValue::Array{})},
+      {"settlements",
+       PayloadValue::array(is_liquidation
+                               ? liquidation_settlements(trade, maker)
+                               : PayloadValue::Array{})},
   };
   if (maker != nullptr) {
     payload.emplace("maker_user_id", text(maker->user_id));
@@ -544,6 +681,13 @@ void append_trade_executed(
     payload.emplace("taker_user_id", text(taker->user_id));
     payload.emplace("taker_reservation_id", taker->reservation_id);
   }
+  if (is_liquidation) {
+    payload.emplace("liquidation_id", context.liquidation_id);
+    payload.emplace("liquidated_user_id", number_value(context.liquidated_user_id));
+    payload.emplace("position_side",
+                    adapter_side_text(context.liquidation_position_side));
+    payload.emplace("liquidation_fee", number_value(liquidation_fee_for(trade)));
+  }
 
   result.events.push_back(
       make_event("TradeExecuted",
@@ -552,6 +696,13 @@ void append_trade_executed(
                  market_sequences,
                  clock,
                  std::move(payload)));
+  if (is_liquidation) {
+    result.events.push_back(make_liquidation_executed_event(trade,
+                                                            context,
+                                                            taker,
+                                                            market_sequences,
+                                                            clock));
+  }
   append_position_and_risk_updates(result,
                                    trade,
                                    context,

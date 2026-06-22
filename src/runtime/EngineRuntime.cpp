@@ -1,6 +1,9 @@
 #include "runtime/EngineRuntime.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cstdint>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -48,6 +51,16 @@ namespace {
     const std::vector<EngineEvent>& core_events) {
   for (const auto& event : core_events) {
     if (std::holds_alternative<OrderAccepted>(event)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+[[nodiscard]] bool has_trade_executed(
+    const std::vector<EngineEvent>& core_events) {
+  for (const auto& event : core_events) {
+    if (std::holds_alternative<TradeExecuted>(event)) {
       return true;
     }
   }
@@ -199,6 +212,75 @@ template <typename Value>
          (side == cex::adapter::AdapterSide::Short && signed_quantity < 0);
 }
 
+[[nodiscard]] cex::adapter::AdapterSide liquidation_order_side(
+    std::int64_t signed_quantity) {
+  return signed_quantity > 0 ? cex::adapter::AdapterSide::Short
+                             : cex::adapter::AdapterSide::Long;
+}
+
+[[nodiscard]] cex::adapter::AdapterQuantity liquidation_quantity(
+    const cex::adapter::LiquidatePositionInput& input,
+    const IsolatedPositionState& position) {
+  const auto position_quantity = abs_quantity(position.signed_quantity);
+  if (input.quantity <= 0) {
+    return position_quantity;
+  }
+  return std::min(input.quantity, position_quantity);
+}
+
+[[nodiscard]] cex::adapter::AdapterPrice liquidation_price(
+    const cex::adapter::LiquidatePositionInput& input,
+    const IsolatedPositionState& position,
+    const std::unordered_map<cex::adapter::MarketId, MarkPriceState>&
+        mark_prices) {
+  if (input.price > 0) {
+    return input.price;
+  }
+  const auto mark = mark_prices.find(input.market_id);
+  if (mark != mark_prices.end() && mark->second.mark_price > 0) {
+    return mark->second.mark_price;
+  }
+  return position.average_entry_price;
+}
+
+[[nodiscard]] cex::adapter::AdapterOrderId liquidation_order_id(
+    const std::string& liquidation_id) {
+  const auto raw = cex::adapter::command_id_from_request_id(liquidation_id);
+  constexpr auto max_order_id =
+      static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+  auto bounded = raw & max_order_id;
+  if (bounded == 0) {
+    bounded = 1;
+  }
+  return static_cast<cex::adapter::AdapterOrderId>(bounded);
+}
+
+[[nodiscard]] bool crossing_liquidity_exists(
+    const EngineCore& core,
+    cex::adapter::MarketId market_id,
+    cex::adapter::AdapterSide order_side,
+    cex::adapter::AdapterPrice price) {
+  if (price <= 0 || market_id <= 0 ||
+      market_id > std::numeric_limits<SymbolId>::max()) {
+    return false;
+  }
+
+  const auto* book = core.get_order_book(static_cast<SymbolId>(market_id));
+  if (book == nullptr) {
+    return false;
+  }
+
+  if (order_side == cex::adapter::AdapterSide::Long) {
+    const auto* best_ask = book->best_ask();
+    return best_ask != nullptr && !best_ask->totalQuantity.is_zero() &&
+           best_ask->price.ticks() <= price;
+  }
+
+  const auto* best_bid = book->best_bid();
+  return best_bid != nullptr && !best_bid->totalQuantity.is_zero() &&
+         best_bid->price.ticks() >= price;
+}
+
 [[nodiscard]] std::string position_id_text(
     cex::adapter::AdapterUserId user_id,
     cex::adapter::MarketId market_id) {
@@ -343,18 +425,6 @@ void add_runtime_engine_fields(
   };
 }
 
-[[nodiscard]] EngineOutputRecord make_liquidation_accepted_reply(
-    const InboundEngineRecord& record,
-    const cex::adapter::LiquidatePositionInput& input,
-    OrderId liquidation_order_id) {
-  PayloadFields payload{
-      {"liquidation_id", input.liquidation_id},
-      {"order_id", number_value(liquidation_order_id)},
-  };
-  return make_liquidation_reply(
-      "LiquidationAccepted", record, input, std::move(payload));
-}
-
 [[nodiscard]] EngineOutputRecord make_liquidation_rejected_reply(
     const InboundEngineRecord& record,
     const cex::adapter::LiquidatePositionInput& input,
@@ -395,76 +465,10 @@ void add_runtime_engine_fields(
                                    std::move(payload));
 }
 
-[[nodiscard]] EngineOutputRecord make_liquidation_executed_event(
-    const InboundEngineRecord& record,
-    const cex::adapter::LiquidatePositionInput& input,
-    const IsolatedPositionState& position,
-    EngineSequence fill_id,
-    cex::adapter::MarketSequenceGenerator& market_sequences,
-    const EngineRuntimeClock& clock) {
-  const auto price = input.price > 0 ? input.price : position.average_entry_price;
-  const auto quantity = input.quantity > 0
-                            ? input.quantity
-                            : abs_quantity(position.signed_quantity);
-  PayloadFields payload{
-      {"liquidation_id", input.liquidation_id},
-      {"user_id", number_value(input.liquidated_user_id)},
-      {"position_id", position_id_text(input.liquidated_user_id,
-                                        input.market_id)},
-      {"fill_id", number_value(fill_id)},
-      {"price", number_value(price)},
-      {"quantity", number_value(quantity)},
-      {"execution_reason", "LIQUIDATION"},
-  };
-  return make_runtime_market_event("LiquidationExecuted",
-                                   input.market_id,
-                                   record,
-                                   input.input_id,
-                                   market_sequences,
-                                   clock,
-                                   std::move(payload));
-}
-
-[[nodiscard]] EngineOutputRecord make_liquidation_position_changed_event(
-    const InboundEngineRecord& record,
-    const cex::adapter::LiquidatePositionInput& input,
-    const IsolatedPositionState& flat_position,
-    const IsolatedRiskState& previous_risk,
-    cex::adapter::MarketSequenceGenerator& market_sequences,
-    const EngineRuntimeClock& clock) {
-  PayloadFields payload{
-      {"user_id", number_value(flat_position.user_id)},
-      {"position_id", position_id_text(flat_position.user_id,
-                                        flat_position.market_id)},
-      {"side", position_side_text(flat_position.signed_quantity)},
-      {"signed_quantity", number_value(flat_position.signed_quantity)},
-      {"quantity", number_value(0)},
-      {"average_entry_price", number_value(flat_position.average_entry_price)},
-      {"entry_price", number_value(flat_position.average_entry_price)},
-      {"mark_price", number_value(previous_risk.mark_price)},
-      {"isolated_margin", number_value(flat_position.isolated_margin)},
-      {"realized_pnl", number_value(previous_risk.unrealized_pnl)},
-      {"unrealized_pnl", number_value(0)},
-      {"maintenance_margin", number_value(0)},
-      {"liquidation_price", number_value(0)},
-      {"reason", "LIQUIDATION"},
-      {"margin_asset", flat_position.margin_asset},
-      {"leverage", number_value(flat_position.leverage)},
-      {"last_fill_quantity", number_value(input.quantity)},
-      {"last_fill_price", number_value(input.price)},
-  };
-  return make_runtime_market_event("PositionChanged",
-                                   flat_position.market_id,
-                                   record,
-                                   input.input_id,
-                                   market_sequences,
-                                   clock,
-                                   std::move(payload));
-}
-
 [[nodiscard]] EngineOutputRecord make_liquidation_completed_event(
     const InboundEngineRecord& record,
     const cex::adapter::LiquidatePositionInput& input,
+    std::int64_t remaining_quantity,
     cex::adapter::MarketSequenceGenerator& market_sequences,
     const EngineRuntimeClock& clock) {
   PayloadFields payload{
@@ -472,8 +476,8 @@ void add_runtime_engine_fields(
       {"user_id", number_value(input.liquidated_user_id)},
       {"position_id", position_id_text(input.liquidated_user_id,
                                         input.market_id)},
-      {"final_status", "FLAT"},
-      {"remaining_quantity", number_value(0)},
+      {"final_status", remaining_quantity == 0 ? "FLAT" : "PARTIAL"},
+      {"remaining_quantity", number_value(remaining_quantity)},
       {"insurance_fund_delta", number_value(0)},
       {"bad_debt", number_value(0)},
   };
@@ -512,6 +516,40 @@ void add_runtime_engine_fields(
     return "position is not liquidatable";
   }
   return {};
+}
+
+[[nodiscard]] cex::adapter::PlaceOrderInput synthetic_liquidation_order(
+    const cex::adapter::LiquidatePositionInput& input,
+    const IsolatedPositionState& position,
+    cex::adapter::AdapterQuantity quantity,
+    cex::adapter::AdapterPrice price) {
+  auto envelope = input.envelope;
+  envelope.request_id = "liquidation-core-" + input.liquidation_id;
+  envelope.idempotency_key = "liquidation-core-" + input.liquidation_id;
+  envelope.user_id = input.liquidated_user_id;
+
+  return cex::adapter::PlaceOrderInput{
+      .input_id = input.input_id.has_value()
+                      ? std::optional<std::string>{"liquidation-core-" +
+                                                   *input.input_id}
+                      : std::nullopt,
+      .envelope = std::move(envelope),
+      .order_id = liquidation_order_id(input.liquidation_id),
+      .reservation_id = "liquidation-" + input.liquidation_id,
+      .market_id = input.market_id,
+      .market_name = input.market_name,
+      .side = liquidation_order_side(position.signed_quantity),
+      .order_type = cex::adapter::AdapterOrderType::Limit,
+      .time_in_force = cex::adapter::AdapterTimeInForce::Ioc,
+      .price = price,
+      .quantity = quantity,
+      .reduce_only = true,
+      .margin_asset = position.margin_asset.empty() ? "USDC"
+                                                    : position.margin_asset,
+      .reserved_margin_amount = 0,
+      .leverage = position.leverage,
+      .source = input.source,
+  };
 }
 
 [[nodiscard]] EngineProcessResult rejected_no_output() {
@@ -720,65 +758,93 @@ EngineProcessResult EngineRuntime::process(const InboundEngineRecord& record,
     };
     const auto previous_position = positions_.at(key);
     const auto previous_risk = risk_states_.at(key);
-    const auto fill_id = market_sequences_.peek(input.market_id) + 1;
-    const auto liquidation_order_id =
-        static_cast<OrderId>(
-            cex::adapter::command_id_from_request_id(input.liquidation_id));
+    const auto order_quantity = liquidation_quantity(input, previous_position);
+    const auto order_price =
+        liquidation_price(input, previous_position, mark_prices_);
+    const auto order_side =
+        liquidation_order_side(previous_position.signed_quantity);
+    if (order_quantity <= 0 ||
+        !crossing_liquidity_exists(core_,
+                                   input.market_id,
+                                   order_side,
+                                   order_price)) {
+      result.replies.push_back(make_liquidation_rejected_reply(
+          record, input, "no liquidation liquidity"));
+      mark_processed(RuntimeCommandKind::LiquidatePosition,
+                     record,
+                     input.input_id,
+                     input.envelope.idempotency_key);
+      return apply_processing_mode(std::move(result), mode);
+    }
 
-    result.replies.push_back(make_liquidation_accepted_reply(
-        record, input, liquidation_order_id));
+    auto synthetic =
+        synthetic_liquidation_order(input, previous_position, order_quantity, order_price);
+    auto mapped = cex::adapter::map_place_order_to_core(
+        synthetic, received_sequence(record));
+    if (!mapped.metadata_to_record.has_value()) {
+      throw std::runtime_error(
+          "liquidation order mapping did not produce metadata");
+    }
+
+    EngineEventTranslationContext context{
+        .command_kind = RuntimeCommandKind::LiquidatePosition,
+        .source = record,
+        .request_id = input.envelope.request_id,
+        .input_id = input.input_id,
+        .reply_partition = input.envelope.reply_partition,
+        .order_id = synthetic.order_id,
+        .market_id = input.market_id,
+        .can_open_resting_order = false,
+        .pending_metadata = *mapped.metadata_to_record,
+        .liquidation_id = input.liquidation_id,
+        .liquidated_user_id = input.liquidated_user_id,
+        .liquidation_position_side = input.position_side,
+    };
+
+    auto core_events = core_.process(mapped.command);
+    if (!has_trade_executed(core_events)) {
+      result.replies.clear();
+      result.events.clear();
+      result.replies.push_back(make_liquidation_rejected_reply(
+          record, input, "no liquidation liquidity"));
+      mark_processed(RuntimeCommandKind::LiquidatePosition,
+                     record,
+                     input.input_id,
+                     input.envelope.idempotency_key);
+      return apply_processing_mode(std::move(result), mode);
+    }
+
     result.events.push_back(make_liquidation_started_event(record,
                                                            input,
                                                            previous_position,
                                                            previous_risk,
                                                            market_sequences_,
                                                            clock_));
-    result.events.push_back(make_liquidation_executed_event(record,
-                                                            input,
-                                                            previous_position,
-                                                            fill_id,
-                                                            market_sequences_,
-                                                            clock_));
+    auto translated = translator_.translate(core_events,
+                                            context,
+                                            metadata_store_,
+                                            positions_,
+                                            risk_states_,
+                                            mark_prices_,
+                                            market_sequences_,
+                                            clock_);
 
-    auto flat_position = previous_position;
-    flat_position.signed_quantity = 0;
-    flat_position.average_entry_price = 0;
-    flat_position.isolated_margin = 0;
-    flat_position.updated_at_ms = clock_ ? clock_() : 0;
-    positions_[key] = flat_position;
+    result.replies.insert(result.replies.end(),
+                          translated.replies.begin(),
+                          translated.replies.end());
+    result.events.insert(result.events.end(),
+                         translated.events.begin(),
+                         translated.events.end());
 
-    IsolatedRiskState flat_risk{
-        .user_id = input.liquidated_user_id,
-        .market_id = input.market_id,
-        .status = "FLAT",
-        .margin_asset = previous_risk.margin_asset,
-        .signed_quantity = 0,
-        .average_entry_price = 0,
-        .mark_price = previous_risk.mark_price,
-        .isolated_margin = 0,
-        .unrealized_pnl = 0,
-        .equity = 0,
-        .maintenance_margin = 0,
-        .margin_ratio = 0,
-        .leverage = previous_risk.leverage,
-        .updated_at_ms = flat_position.updated_at_ms,
-    };
-    risk_states_[key] = flat_risk;
-
-    result.events.push_back(make_liquidation_position_changed_event(
-        record,
-        input,
-        flat_position,
-        previous_risk,
-        market_sequences_,
-        clock_));
-    result.events.push_back(make_runtime_risk_state_updated_event(record,
-                                                                  input.input_id,
-                                                                  flat_risk,
-                                                                  market_sequences_,
-                                                                  clock_));
+    cleanup_completed_order_metadata(metadata_store_, core_events);
+    const auto remaining_position = positions_.find(key);
+    const auto remaining_quantity =
+        remaining_position == positions_.end()
+            ? 0
+            : abs_quantity(remaining_position->second.signed_quantity);
     result.events.push_back(make_liquidation_completed_event(record,
                                                              input,
+                                                             remaining_quantity,
                                                              market_sequences_,
                                                              clock_));
 
