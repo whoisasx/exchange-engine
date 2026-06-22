@@ -116,6 +116,14 @@ struct OrderMetadata {
   OrderId order_id{0};
   MarketId market_id{0};
   AdapterUserId user_id{0};
+  AdapterSide side{AdapterSide::Long};
+  AdapterQuantity original_quantity{0};
+  AdapterQuantity remaining_quantity{0};
+  bool reduce_only{false};
+  std::string margin_asset;
+  std::int64_t reserved_margin_amount{0};
+  std::int64_t remaining_reserved_margin{0};
+  std::int32_t leverage{0};
   std::string reservation_id;
   std::string place_request_id;
   std::string place_idempotency_key;

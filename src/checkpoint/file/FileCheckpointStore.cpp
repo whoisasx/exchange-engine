@@ -224,6 +224,19 @@ template <typename Enum>
   }
 }
 
+[[nodiscard]] cex::adapter::AdapterSide parse_adapter_side(
+    const std::string& value) {
+  const int parsed = parse_integer<int>(value);
+  switch (parsed) {
+    case static_cast<int>(cex::adapter::AdapterSide::Long):
+      return cex::adapter::AdapterSide::Long;
+    case static_cast<int>(cex::adapter::AdapterSide::Short):
+      return cex::adapter::AdapterSide::Short;
+    default:
+      throw CheckpointParseError("invalid adapter side in checkpoint field");
+  }
+}
+
 [[nodiscard]] cex::runtime::RuntimeCommandKind parse_runtime_command_kind(
     const std::string& value) {
   const int parsed = parse_integer<int>(value);
@@ -397,6 +410,33 @@ sorted_funding_rates(
             [](const auto& left, const auto& right) {
               return left.first < right.first;
             });
+  return sorted;
+}
+
+[[nodiscard]] std::vector<
+    std::pair<cex::runtime::PositionRiskKey,
+              cex::runtime::IsolatedPositionState>>
+sorted_positions(const cex::runtime::IsolatedPositionMap& entries) {
+  std::vector<std::pair<cex::runtime::PositionRiskKey,
+                        cex::runtime::IsolatedPositionState>>
+      sorted;
+  sorted.reserve(entries.size());
+  for (const auto& [key, state] : entries) {
+    sorted.emplace_back(key, state);
+  }
+  return sorted;
+}
+
+[[nodiscard]] std::vector<
+    std::pair<cex::runtime::PositionRiskKey, cex::runtime::IsolatedRiskState>>
+sorted_risk_states(const cex::runtime::IsolatedRiskMap& entries) {
+  std::vector<std::pair<cex::runtime::PositionRiskKey,
+                        cex::runtime::IsolatedRiskState>>
+      sorted;
+  sorted.reserve(entries.size());
+  for (const auto& [key, state] : entries) {
+    sorted.emplace_back(key, state);
+  }
   return sorted;
 }
 
@@ -577,6 +617,14 @@ void write_metadata_store(std::ostream& out,
                 std::to_string(metadata.order_id),
                 std::to_string(metadata.market_id),
                 std::to_string(metadata.user_id),
+                enum_field(metadata.side),
+                std::to_string(metadata.original_quantity),
+                std::to_string(metadata.remaining_quantity),
+                bool_field(metadata.reduce_only),
+                escape_field(metadata.margin_asset),
+                std::to_string(metadata.reserved_margin_amount),
+                std::to_string(metadata.remaining_reserved_margin),
+                std::to_string(metadata.leverage),
                 escape_field(metadata.reservation_id),
                 escape_field(metadata.place_request_id),
                 escape_field(metadata.place_idempotency_key),
@@ -656,6 +704,54 @@ void write_funding_rates(
   }
 }
 
+void write_positions(std::ostream& out,
+                     const cex::runtime::IsolatedPositionMap& entries) {
+  const auto sorted = sorted_positions(entries);
+  write_line(out, {"positions", std::to_string(sorted.size())});
+
+  for (const auto& [key, state] : sorted) {
+    write_line(out,
+               {"position_state",
+                std::to_string(key.user_id),
+                std::to_string(key.market_id),
+                std::to_string(state.user_id),
+                std::to_string(state.market_id),
+                std::to_string(state.signed_quantity),
+                std::to_string(state.average_entry_price),
+                escape_field(state.margin_asset),
+                std::to_string(state.isolated_margin),
+                std::to_string(state.leverage),
+                std::to_string(state.updated_at_ms)});
+  }
+}
+
+void write_risk_states(std::ostream& out,
+                       const cex::runtime::IsolatedRiskMap& entries) {
+  const auto sorted = sorted_risk_states(entries);
+  write_line(out, {"risk_states", std::to_string(sorted.size())});
+
+  for (const auto& [key, state] : sorted) {
+    write_line(out,
+               {"risk_state",
+                std::to_string(key.user_id),
+                std::to_string(key.market_id),
+                std::to_string(state.user_id),
+                std::to_string(state.market_id),
+                escape_field(state.status),
+                escape_field(state.margin_asset),
+                std::to_string(state.signed_quantity),
+                std::to_string(state.average_entry_price),
+                std::to_string(state.mark_price),
+                std::to_string(state.isolated_margin),
+                std::to_string(state.unrealized_pnl),
+                std::to_string(state.equity),
+                std::to_string(state.maintenance_margin),
+                std::to_string(state.margin_ratio),
+                std::to_string(state.leverage),
+                std::to_string(state.updated_at_ms)});
+  }
+}
+
 void write_checkpoint(std::ostream& out, const EngineCheckpoint& checkpoint) {
   out << kMagic << '\n';
 
@@ -695,6 +791,8 @@ void write_checkpoint(std::ostream& out, const EngineCheckpoint& checkpoint) {
 
   write_mark_prices(out, checkpoint.mark_prices);
   write_funding_rates(out, checkpoint.funding_rates);
+  write_positions(out, checkpoint.positions);
+  write_risk_states(out, checkpoint.risk_states);
   write_metadata_store(out, checkpoint);
   write_processed_requests(
       out, "processed_input_ids", checkpoint.processed_input_ids);
@@ -761,6 +859,16 @@ class CheckpointReader {
 
     if (!section.empty() && section.front() == "funding_rates") {
       checkpoint.funding_rates = read_funding_rates(section);
+      section = read_fields_any();
+    }
+
+    if (!section.empty() && section.front() == "positions") {
+      checkpoint.positions = read_positions(section);
+      section = read_fields_any();
+    }
+
+    if (!section.empty() && section.front() == "risk_states") {
+      checkpoint.risk_states = read_risk_states(section);
       section = read_fields_any();
     }
 
@@ -1104,6 +1212,90 @@ class CheckpointReader {
     return funding_rates;
   }
 
+  [[nodiscard]] cex::runtime::IsolatedPositionMap read_positions(
+      const std::vector<std::string>& count_fields) {
+    const std::size_t count = count_from_fields(count_fields, "positions");
+    cex::runtime::IsolatedPositionMap positions;
+
+    for (std::size_t index = 0; index < count; ++index) {
+      const auto fields = read_fields("position_state");
+      require_field_count(fields, 11);
+
+      cex::runtime::PositionRiskKey key{
+          .user_id = parse_integer<cex::adapter::AdapterUserId>(fields[1]),
+          .market_id = parse_integer<cex::adapter::MarketId>(fields[2]),
+      };
+      cex::runtime::IsolatedPositionState state{
+          .user_id = parse_integer<cex::adapter::AdapterUserId>(fields[3]),
+          .market_id = parse_integer<cex::adapter::MarketId>(fields[4]),
+          .signed_quantity = parse_integer<std::int64_t>(fields[5]),
+          .average_entry_price =
+              parse_integer<cex::adapter::AdapterPrice>(fields[6]),
+          .margin_asset = unescape_field(fields[7]),
+          .isolated_margin = parse_integer<std::int64_t>(fields[8]),
+          .leverage = parse_integer<std::int32_t>(fields[9]),
+          .updated_at_ms = parse_integer<std::int64_t>(fields[10]),
+      };
+
+      if (!positions.emplace(key, std::move(state)).second) {
+        throw CheckpointParseError("duplicate position key");
+      }
+    }
+
+    return positions;
+  }
+
+  [[nodiscard]] cex::runtime::IsolatedRiskMap read_risk_states(
+      const std::vector<std::string>& count_fields) {
+    const std::size_t count = count_from_fields(count_fields, "risk_states");
+    cex::runtime::IsolatedRiskMap risk_states;
+
+    for (std::size_t index = 0; index < count; ++index) {
+      const auto fields = read_fields("risk_state");
+      if (fields.size() != 14 && fields.size() != 17) {
+        throw CheckpointParseError("unexpected checkpoint field count");
+      }
+
+      cex::runtime::PositionRiskKey key{
+          .user_id = parse_integer<cex::adapter::AdapterUserId>(fields[1]),
+          .market_id = parse_integer<cex::adapter::MarketId>(fields[2]),
+      };
+      cex::runtime::IsolatedRiskState state{
+          .user_id = parse_integer<cex::adapter::AdapterUserId>(fields[3]),
+          .market_id = parse_integer<cex::adapter::MarketId>(fields[4]),
+          .status = unescape_field(fields[5]),
+          .margin_asset = unescape_field(fields[6]),
+          .signed_quantity = parse_integer<std::int64_t>(fields[7]),
+          .average_entry_price =
+              parse_integer<cex::adapter::AdapterPrice>(fields[8]),
+          .mark_price = parse_integer<cex::adapter::AdapterPrice>(fields[9]),
+          .isolated_margin = parse_integer<std::int64_t>(fields[10]),
+          .unrealized_pnl = parse_integer<std::int64_t>(fields[11]),
+          .equity =
+              fields.size() == 17
+                  ? parse_integer<std::int64_t>(fields[12])
+                  : parse_integer<std::int64_t>(fields[10]) +
+                        parse_integer<std::int64_t>(fields[11]),
+          .maintenance_margin =
+              fields.size() == 17 ? parse_integer<std::int64_t>(fields[13])
+                                  : 0,
+          .margin_ratio =
+              fields.size() == 17 ? parse_integer<std::int64_t>(fields[14])
+                                  : 0,
+          .leverage = parse_integer<std::int32_t>(
+              fields.size() == 17 ? fields[15] : fields[12]),
+          .updated_at_ms = parse_integer<std::int64_t>(
+              fields.size() == 17 ? fields[16] : fields[13]),
+      };
+
+      if (!risk_states.emplace(key, std::move(state)).second) {
+        throw CheckpointParseError("duplicate risk state key");
+      }
+    }
+
+    return risk_states;
+  }
+
   [[nodiscard]] cex::adapter::OrderMetadataStore read_metadata_store() {
     return read_metadata_store(read_fields("metadata"));
   }
@@ -1115,22 +1307,58 @@ class CheckpointReader {
 
     for (std::size_t index = 0; index < count; ++index) {
       const auto fields = read_fields("metadata_entry");
-      require_field_count(fields, 12);
+      if (fields.size() != 12 && fields.size() != 20) {
+        throw CheckpointParseError("unexpected checkpoint field count");
+      }
+
+      if (fields.size() == 12) {
+        cex::adapter::OrderMetadata metadata{
+            .order_id = parse_integer<OrderId>(fields[1]),
+            .market_id = parse_integer<cex::adapter::MarketId>(fields[2]),
+            .user_id = parse_integer<cex::adapter::AdapterUserId>(fields[3]),
+            .reservation_id = unescape_field(fields[4]),
+            .place_request_id = unescape_field(fields[5]),
+            .place_idempotency_key = unescape_field(fields[6]),
+            .place_input_id = parse_bool(fields[7])
+                                  ? std::optional<std::string>{
+                                        unescape_field(fields[8])}
+                                  : std::nullopt,
+            .reply_partition = parse_integer<std::int32_t>(fields[9]),
+            .core_client_order_id = parse_integer<ClientOrderId>(fields[10]),
+            .core_place_command_id = parse_integer<CommandId>(fields[11]),
+        };
+
+        if (!store.insert(std::move(metadata))) {
+          throw CheckpointParseError("duplicate metadata order id");
+        }
+        continue;
+      }
 
       cex::adapter::OrderMetadata metadata{
           .order_id = parse_integer<OrderId>(fields[1]),
           .market_id = parse_integer<cex::adapter::MarketId>(fields[2]),
           .user_id = parse_integer<cex::adapter::AdapterUserId>(fields[3]),
-          .reservation_id = unescape_field(fields[4]),
-          .place_request_id = unescape_field(fields[5]),
-          .place_idempotency_key = unescape_field(fields[6]),
-          .place_input_id = parse_bool(fields[7])
+          .side = parse_adapter_side(fields[4]),
+          .original_quantity =
+              parse_integer<cex::adapter::AdapterQuantity>(fields[5]),
+          .remaining_quantity =
+              parse_integer<cex::adapter::AdapterQuantity>(fields[6]),
+          .reduce_only = parse_bool(fields[7]),
+          .margin_asset = unescape_field(fields[8]),
+          .reserved_margin_amount = parse_integer<std::int64_t>(fields[9]),
+          .remaining_reserved_margin =
+              parse_integer<std::int64_t>(fields[10]),
+          .leverage = parse_integer<std::int32_t>(fields[11]),
+          .reservation_id = unescape_field(fields[12]),
+          .place_request_id = unescape_field(fields[13]),
+          .place_idempotency_key = unescape_field(fields[14]),
+          .place_input_id = parse_bool(fields[15])
                                 ? std::optional<std::string>{
-                                      unescape_field(fields[8])}
+                                      unescape_field(fields[16])}
                                 : std::nullopt,
-          .reply_partition = parse_integer<std::int32_t>(fields[9]),
-          .core_client_order_id = parse_integer<ClientOrderId>(fields[10]),
-          .core_place_command_id = parse_integer<CommandId>(fields[11]),
+          .reply_partition = parse_integer<std::int32_t>(fields[17]),
+          .core_client_order_id = parse_integer<ClientOrderId>(fields[18]),
+          .core_place_command_id = parse_integer<CommandId>(fields[19]),
       };
 
       if (!store.insert(std::move(metadata))) {

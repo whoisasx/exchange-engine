@@ -112,6 +112,13 @@ const EngineOutputRecord* find_record(
   return nullptr;
 }
 
+std::string payload_number_text(const EngineOutputRecord& record,
+                                const std::string& field) {
+  const auto* value = record.payload.at(field).as_number();
+  assert(value != nullptr);
+  return value->text;
+}
+
 void assert_book_has_order(const EngineRuntime& runtime, OrderId order_id) {
   const auto* book = runtime.core().get_order_book(1);
   assert(book != nullptr);
@@ -242,6 +249,55 @@ void assert_funding_rate_fixture_state(const FundingRateState& state) {
   assert(state.interval_start_ms == 1'710'000'000'000LL);
   assert(state.interval_end_ms == 1'710'028'800'000LL);
   assert(state.source_timestamp_ms == 1'710'000'001'000LL);
+}
+
+void assert_position_state(const EngineRuntime& runtime,
+                           std::int64_t user_id,
+                           std::int64_t signed_quantity,
+                           std::int64_t average_entry_price,
+                           std::int64_t isolated_margin) {
+  const auto it = runtime.positions().find(PositionRiskKey{
+      .user_id = user_id,
+      .market_id = 1,
+  });
+  assert(it != runtime.positions().end());
+  assert(it->second.user_id == user_id);
+  assert(it->second.market_id == 1);
+  assert(it->second.signed_quantity == signed_quantity);
+  assert(it->second.average_entry_price == average_entry_price);
+  assert(it->second.margin_asset == "USDC");
+  assert(it->second.isolated_margin == isolated_margin);
+  assert(it->second.leverage == 10);
+}
+
+void assert_risk_state(const EngineRuntime& runtime,
+                       std::int64_t user_id,
+                       std::int64_t signed_quantity,
+                       std::int64_t mark_price,
+                       std::int64_t unrealized_pnl) {
+  const auto it = runtime.risk_states().find(PositionRiskKey{
+      .user_id = user_id,
+      .market_id = 1,
+  });
+  assert(it != runtime.risk_states().end());
+  assert(it->second.user_id == user_id);
+  assert(it->second.market_id == 1);
+  assert(it->second.status == "HEALTHY");
+  assert(it->second.signed_quantity == signed_quantity);
+  assert(it->second.average_entry_price == 100);
+  assert(it->second.mark_price == mark_price);
+  assert(it->second.unrealized_pnl == unrealized_pnl);
+  const auto abs_position =
+      signed_quantity < 0 ? -signed_quantity : signed_quantity;
+  const auto maintenance_margin = (abs_position * mark_price) / 20;
+  const auto equity = 100 + unrealized_pnl;
+  assert(it->second.equity == equity);
+  assert(it->second.maintenance_margin == maintenance_margin);
+  assert(it->second.margin_ratio ==
+         (maintenance_margin == 0 ? 0 : (equity * 10'000) / maintenance_margin));
+  assert(it->second.margin_asset == "USDC");
+  assert(it->second.isolated_margin == 100);
+  assert(it->second.leverage == 10);
 }
 
 std::string place_order_json(const std::string& input_id,
@@ -524,9 +580,16 @@ void test_runtime_crossing_order_emits_trade() {
 
   const auto result = runtime.process(make_record(crossing_order_json(), 1202));
   assert(result.replies.size() == 1);
+  assert(result.events.size() == 6);
   assert(result.replies[0].type == "OrderAccepted");
   assert(result.replies[0].payload.at("request_id") == "req_place_002");
   assert(find_record(result.events, "OrderOpened") == nullptr);
+  assert(result.events[0].type == "TradeExecuted");
+  assert(result.events[1].type == "PositionChanged");
+  assert(result.events[2].type == "RiskStateUpdated");
+  assert(result.events[3].type == "PositionChanged");
+  assert(result.events[4].type == "RiskStateUpdated");
+  assert(result.events[5].type == "OrderBookDelta");
 
   const auto* trade = find_record(result.events, "TradeExecuted");
   assert(trade != nullptr);
@@ -557,16 +620,140 @@ void test_runtime_crossing_order_emits_trade() {
   assert(payload_array(trade_message, "fee_deltas").empty());
   assert(payload_array(trade_message, "settlements").empty());
 
+  const auto& maker_position = result.events[1];
+  assert(maker_position.payload.at("engine_sequence") == "4");
+  assert(maker_position.payload.at("position_id") == "pos_42_1");
+  assert(payload_number_text(maker_position, "user_id") == "42");
+  assert(maker_position.payload.at("side") == "LONG");
+  assert(payload_number_text(maker_position, "signed_quantity") == "10");
+  assert(payload_number_text(maker_position, "average_entry_price") == "100");
+  assert(payload_number_text(maker_position, "mark_price") == "100");
+  assert(payload_number_text(maker_position, "isolated_margin") == "100");
+  assert(payload_number_text(maker_position, "realized_pnl") == "0");
+  assert(payload_number_text(maker_position, "unrealized_pnl") == "0");
+  assert(payload_number_text(maker_position, "maintenance_margin") == "50");
+  assert(payload_number_text(maker_position, "liquidation_price") == "0");
+  assert(maker_position.payload.at("reason") == "TRADE");
+  const auto maker_position_message =
+      parse_serialized_output(maker_position);
+  assert_payload_string(maker_position_message, "position_id", "pos_42_1");
+  assert_payload_number(maker_position_message, "user_id", "42");
+  assert_payload_number(maker_position_message, "signed_quantity", "10");
+  assert_payload_number(maker_position_message, "average_entry_price", "100");
+  assert_payload_number(maker_position_message, "mark_price", "100");
+  assert_payload_number(maker_position_message, "isolated_margin", "100");
+  assert_payload_number(maker_position_message, "maintenance_margin", "50");
+  assert_payload_number(maker_position_message, "liquidation_price", "0");
+  assert_payload_string(maker_position_message, "reason", "TRADE");
+
+  const auto& maker_risk = result.events[2];
+  assert(maker_risk.payload.at("engine_sequence") == "5");
+  assert(maker_risk.payload.at("position_id") == "pos_42_1");
+  assert(payload_number_text(maker_risk, "user_id") == "42");
+  assert(maker_risk.payload.at("status") == "HEALTHY");
+  assert(payload_number_text(maker_risk, "mark_price") == "100");
+  assert(payload_number_text(maker_risk, "unrealized_pnl") == "0");
+  assert(payload_number_text(maker_risk, "equity") == "100");
+  assert(payload_number_text(maker_risk, "maintenance_margin") == "50");
+  assert(payload_number_text(maker_risk, "margin_ratio") == "20000");
+
+  const auto& taker_position = result.events[3];
+  assert(taker_position.payload.at("engine_sequence") == "6");
+  assert(taker_position.payload.at("position_id") == "pos_43_1");
+  assert(payload_number_text(taker_position, "user_id") == "43");
+  assert(taker_position.payload.at("side") == "SHORT");
+  assert(payload_number_text(taker_position, "signed_quantity") == "-10");
+  assert(payload_number_text(taker_position, "average_entry_price") == "100");
+  assert(payload_number_text(taker_position, "mark_price") == "100");
+  assert(payload_number_text(taker_position, "isolated_margin") == "100");
+  assert(payload_number_text(taker_position, "realized_pnl") == "0");
+  assert(payload_number_text(taker_position, "unrealized_pnl") == "0");
+  assert(payload_number_text(taker_position, "maintenance_margin") == "50");
+  assert(payload_number_text(taker_position, "liquidation_price") == "0");
+  assert(taker_position.payload.at("reason") == "TRADE");
+
+  const auto& taker_risk = result.events[4];
+  assert(taker_risk.payload.at("engine_sequence") == "7");
+  assert(taker_risk.payload.at("position_id") == "pos_43_1");
+  assert(payload_number_text(taker_risk, "user_id") == "43");
+  assert(taker_risk.payload.at("status") == "HEALTHY");
+  assert(payload_number_text(taker_risk, "mark_price") == "100");
+  assert(payload_number_text(taker_risk, "unrealized_pnl") == "0");
+  assert(payload_number_text(taker_risk, "equity") == "100");
+  assert(payload_number_text(taker_risk, "maintenance_margin") == "50");
+  assert(payload_number_text(taker_risk, "margin_ratio") == "20000");
+
   const auto* delta = find_record(result.events, "OrderBookDelta");
   assert(delta != nullptr);
-  assert(delta->payload.at("engine_sequence") == "4");
+  assert(delta->payload.at("engine_sequence") == "8");
   assert(delta->payload.at("quantity") == "0");
   const auto delta_message = parse_serialized_output(*delta);
   const auto& delta_bids = payload_array(delta_message, "bids");
   assert(delta_bids.size() == 1);
   assert_price_level_delta(delta_bids[0], "100", "0");
   assert(payload_array(delta_message, "asks").empty());
+  assert_position_state(runtime, 42, 10, 100, 100);
+  assert_position_state(runtime, 43, -10, 100, 100);
+  assert_risk_state(runtime, 42, 10, 100, 0);
+  assert_risk_state(runtime, 43, -10, 100, 0);
+  const auto snapshot = runtime.snapshot_state();
+  assert(snapshot.positions.size() == 2);
+  assert(snapshot.risk_states.size() == 2);
+  auto restored = make_runtime();
+  restored.restore_state(snapshot);
+  assert_position_state(restored, 42, 10, 100, 100);
+  assert_position_state(restored, 43, -10, 100, 100);
+  assert_risk_state(restored, 42, 10, 100, 0);
+  assert_risk_state(restored, 43, -10, 100, 0);
   assert(runtime.metadata_store().empty());
+}
+
+void test_mark_price_affects_fill_risk_state() {
+  auto runtime = make_runtime();
+  const auto mark = R"json({
+  "type": "MarkPriceUpdated",
+  "payload": {
+    "input_id": "input_mark_before_fill",
+    "market_id": 1,
+    "mark_price": 110,
+    "index_price": 109,
+    "source_timestamp_ms": 1710000000000,
+    "published_at_ms": 1710000000100,
+    "valid_until_ms": 1710000005100,
+    "source_sequence": 45010,
+    "source_status": "VALID"
+  }
+})json";
+  (void)runtime.process(make_record(mark, 1199));
+  const auto resting = read_file(
+      std::filesystem::path(PROTOCOL_EXAMPLES_DIR) /
+      "engine-place-order.command.json");
+  (void)runtime.process(make_record(resting, 1201));
+
+  const auto result = runtime.process(make_record(crossing_order_json(), 1202));
+  assert(result.events.size() == 6);
+  assert(result.events[1].type == "PositionChanged");
+  assert(payload_number_text(result.events[1], "mark_price") == "110");
+  assert(payload_number_text(result.events[1], "unrealized_pnl") == "100");
+  assert(payload_number_text(result.events[1], "maintenance_margin") == "55");
+  assert(result.events[2].type == "RiskStateUpdated");
+  assert(payload_number_text(result.events[2], "mark_price") == "110");
+  assert(payload_number_text(result.events[2], "unrealized_pnl") == "100");
+  assert(payload_number_text(result.events[2], "equity") == "200");
+  assert(payload_number_text(result.events[2], "maintenance_margin") == "55");
+  assert(payload_number_text(result.events[2], "margin_ratio") == "36363");
+  assert(result.events[3].type == "PositionChanged");
+  assert(payload_number_text(result.events[3], "mark_price") == "110");
+  assert(payload_number_text(result.events[3], "unrealized_pnl") == "-100");
+  assert(payload_number_text(result.events[3], "maintenance_margin") == "55");
+  assert(result.events[4].type == "RiskStateUpdated");
+  assert(payload_number_text(result.events[4], "mark_price") == "110");
+  assert(payload_number_text(result.events[4], "unrealized_pnl") == "-100");
+  assert(payload_number_text(result.events[4], "equity") == "0");
+  assert(payload_number_text(result.events[4], "maintenance_margin") == "55");
+  assert(payload_number_text(result.events[4], "margin_ratio") == "0");
+  assert_risk_state(runtime, 42, 10, 110, 100);
+  assert_risk_state(runtime, 43, -10, 110, -100);
 }
 
 void test_runtime_cancel_order() {
@@ -782,7 +969,11 @@ void test_replay_silent_crossing_order_updates_state_without_outputs() {
   assert(runtime.metadata_store().empty());
   assert_book_does_not_have_order(runtime, 9001);
   assert_book_does_not_have_order(runtime, 9002);
-  assert(runtime.market_sequences().peek(1) == 5);
+  assert_position_state(runtime, 42, 10, 100, 100);
+  assert_position_state(runtime, 43, -10, 100, 100);
+  assert_risk_state(runtime, 42, 10, 100, 0);
+  assert_risk_state(runtime, 43, -10, 100, 0);
+  assert(runtime.market_sequences().peek(1) == 9);
 }
 
 void test_replay_silent_mark_price_updates_state_without_outputs() {
@@ -1122,6 +1313,7 @@ int main() {
     test_funding_rate_updated_validation();
     test_runtime_resting_limit_order();
     test_runtime_crossing_order_emits_trade();
+    test_mark_price_affects_fill_risk_state();
     test_runtime_cancel_order();
     test_runtime_mark_price_updated_emits_event_without_reply();
     test_runtime_funding_rate_updated_emits_event_without_reply();

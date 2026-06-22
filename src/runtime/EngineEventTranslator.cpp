@@ -19,6 +19,49 @@ template <typename Value>
   return side == Buy ? "LONG" : "SHORT";
 }
 
+[[nodiscard]] std::string position_side_text(std::int64_t signed_quantity) {
+  if (signed_quantity > 0) {
+    return "LONG";
+  }
+  if (signed_quantity < 0) {
+    return "SHORT";
+  }
+  return "FLAT";
+}
+
+[[nodiscard]] std::int64_t abs_quantity(std::int64_t quantity) {
+  return quantity < 0 ? -quantity : quantity;
+}
+
+[[nodiscard]] std::string position_id_text(
+    cex::adapter::AdapterUserId user_id,
+    cex::adapter::MarketId market_id) {
+  return "pos_" + text(user_id) + "_" + text(market_id);
+}
+
+[[nodiscard]] std::int64_t notional_value(std::int64_t signed_quantity,
+                                          cex::adapter::AdapterPrice price) {
+  return abs_quantity(signed_quantity) * price;
+}
+
+[[nodiscard]] std::int64_t maintenance_margin_for(
+    std::int64_t signed_quantity,
+    cex::adapter::AdapterPrice price) {
+  return notional_value(signed_quantity, price) / 20;
+}
+
+[[nodiscard]] std::int64_t margin_ratio_for(std::int64_t equity,
+                                            std::int64_t maintenance_margin) {
+  if (maintenance_margin == 0) {
+    return 0;
+  }
+  return (equity * 10'000) / maintenance_margin;
+}
+
+[[nodiscard]] bool same_direction(std::int64_t left, std::int64_t right) {
+  return (left > 0 && right > 0) || (left < 0 && right < 0);
+}
+
 [[nodiscard]] std::string reason_text(RejectReason reason) {
   switch (reason) {
     case InvalidSymbol:
@@ -125,6 +168,17 @@ void add_engine_fields(PayloadFields& payload,
   return metadata_store.find(order_id);
 }
 
+[[nodiscard]] cex::adapter::OrderMetadata* find_metadata_mutable(
+    OrderId order_id,
+    EngineEventTranslationContext& context,
+    cex::adapter::OrderMetadataStore& metadata_store) {
+  if (context.pending_metadata.has_value() &&
+      context.pending_metadata->order_id == order_id) {
+    return &*context.pending_metadata;
+  }
+  return metadata_store.find(order_id);
+}
+
 [[nodiscard]] std::unordered_set<OrderId> filled_order_ids(
     const std::vector<EngineEvent>& core_events) {
   std::unordered_set<OrderId> filled;
@@ -134,6 +188,264 @@ void add_engine_fields(PayloadFields& payload,
     }
   }
   return filled;
+}
+
+[[nodiscard]] std::int64_t fallback_margin(
+    const cex::adapter::OrderMetadata& metadata,
+    std::int64_t fill_quantity,
+    cex::adapter::AdapterPrice price) {
+  const auto leverage = metadata.leverage <= 0 ? 1 : metadata.leverage;
+  return (price * fill_quantity) / leverage;
+}
+
+[[nodiscard]] std::int64_t allocate_fill_margin(
+    cex::adapter::OrderMetadata& metadata,
+    std::int64_t fill_quantity,
+    cex::adapter::AdapterPrice price) {
+  const auto original_quantity = metadata.original_quantity;
+  std::int64_t allocated = 0;
+  if (metadata.reserved_margin_amount > 0 && original_quantity > 0) {
+    allocated = (metadata.reserved_margin_amount * fill_quantity) /
+                original_quantity;
+    if (allocated > metadata.remaining_reserved_margin) {
+      allocated = metadata.remaining_reserved_margin;
+    }
+  } else {
+    allocated = fallback_margin(metadata, fill_quantity, price);
+  }
+
+  if (metadata.remaining_quantity > fill_quantity) {
+    metadata.remaining_quantity -= fill_quantity;
+  } else {
+    metadata.remaining_quantity = 0;
+  }
+  if (metadata.remaining_reserved_margin > allocated) {
+    metadata.remaining_reserved_margin -= allocated;
+  } else {
+    metadata.remaining_reserved_margin = 0;
+  }
+  return allocated;
+}
+
+[[nodiscard]] std::int64_t signed_fill_quantity(
+    const cex::adapter::OrderMetadata& metadata,
+    std::int64_t fill_quantity) {
+  return metadata.side == cex::adapter::AdapterSide::Long ? fill_quantity
+                                                          : -fill_quantity;
+}
+
+void apply_position_fill(IsolatedPositionState& position,
+                         const cex::adapter::OrderMetadata& metadata,
+                         std::int64_t signed_fill,
+                         cex::adapter::AdapterPrice price,
+                         std::int64_t fill_margin,
+                         std::int64_t timestamp_ms) {
+  const auto old_quantity = position.signed_quantity;
+  const auto new_quantity = old_quantity + signed_fill;
+  const auto old_abs = abs_quantity(old_quantity);
+  const auto fill_abs = abs_quantity(signed_fill);
+
+  cex::adapter::AdapterPrice new_average = position.average_entry_price;
+  std::int64_t new_margin = position.isolated_margin;
+
+  if (old_quantity == 0) {
+    new_average = price;
+    new_margin = fill_margin;
+  } else if (same_direction(old_quantity, signed_fill)) {
+    const auto new_abs = old_abs + fill_abs;
+    new_average =
+        (position.average_entry_price * old_abs + price * fill_abs) / new_abs;
+    new_margin += fill_margin;
+  } else if (new_quantity == 0) {
+    new_average = 0;
+    new_margin = 0;
+  } else if (same_direction(old_quantity, new_quantity)) {
+    new_margin = old_abs == 0
+                     ? 0
+                     : (position.isolated_margin * abs_quantity(new_quantity)) /
+                           old_abs;
+  } else {
+    new_average = price;
+    new_margin =
+        fill_abs == 0 ? 0 : (fill_margin * abs_quantity(new_quantity)) / fill_abs;
+  }
+
+  position.user_id = metadata.user_id;
+  position.market_id = metadata.market_id;
+  position.signed_quantity = new_quantity;
+  position.average_entry_price = new_average;
+  if (!metadata.margin_asset.empty()) {
+    position.margin_asset = metadata.margin_asset;
+  }
+  position.isolated_margin = new_margin;
+  if (position.leverage == 0 || old_quantity == 0) {
+    position.leverage = metadata.leverage;
+  }
+  position.updated_at_ms = timestamp_ms;
+}
+
+[[nodiscard]] cex::adapter::AdapterPrice mark_price_for(
+    cex::adapter::MarketId market_id,
+    cex::adapter::AdapterPrice trade_price,
+    const std::unordered_map<cex::adapter::MarketId, MarkPriceState>&
+        mark_prices) {
+  const auto it = mark_prices.find(market_id);
+  return it == mark_prices.end() ? trade_price : it->second.mark_price;
+}
+
+[[nodiscard]] IsolatedRiskState risk_from_position(
+    const IsolatedPositionState& position,
+    cex::adapter::AdapterPrice mark_price,
+    std::int64_t timestamp_ms) {
+  const auto unrealized_pnl =
+      (mark_price - position.average_entry_price) * position.signed_quantity;
+  const auto maintenance_margin =
+      maintenance_margin_for(position.signed_quantity, mark_price);
+  const auto equity = position.isolated_margin + unrealized_pnl;
+  return IsolatedRiskState{
+      .user_id = position.user_id,
+      .market_id = position.market_id,
+      .status = position.signed_quantity == 0 ? "FLAT" : "HEALTHY",
+      .margin_asset = position.margin_asset,
+      .signed_quantity = position.signed_quantity,
+      .average_entry_price = position.average_entry_price,
+      .mark_price = mark_price,
+      .isolated_margin = position.isolated_margin,
+      .unrealized_pnl = unrealized_pnl,
+      .equity = equity,
+      .maintenance_margin = maintenance_margin,
+      .margin_ratio = margin_ratio_for(equity, maintenance_margin),
+      .leverage = position.leverage,
+      .updated_at_ms = timestamp_ms,
+  };
+}
+
+[[nodiscard]] EngineOutputRecord make_position_changed_event(
+    const IsolatedPositionState& position,
+    std::int64_t fill_quantity,
+    cex::adapter::AdapterPrice fill_price,
+    cex::adapter::AdapterPrice mark_price,
+    const EngineEventTranslationContext& context,
+    cex::adapter::MarketSequenceGenerator& market_sequences,
+    const EngineRuntimeClock& clock) {
+  const auto unrealized_pnl =
+      (mark_price - position.average_entry_price) * position.signed_quantity;
+  const auto maintenance_margin =
+      maintenance_margin_for(position.signed_quantity, mark_price);
+  PayloadFields payload{
+      {"user_id", number_value(position.user_id)},
+      {"position_id", position_id_text(position.user_id, position.market_id)},
+      {"side", position_side_text(position.signed_quantity)},
+      {"signed_quantity", number_value(position.signed_quantity)},
+      {"quantity", number_value(abs_quantity(position.signed_quantity))},
+      {"average_entry_price", number_value(position.average_entry_price)},
+      {"entry_price", number_value(position.average_entry_price)},
+      {"mark_price", number_value(mark_price)},
+      {"isolated_margin", number_value(position.isolated_margin)},
+      {"realized_pnl", number_value(0)},
+      {"unrealized_pnl", number_value(unrealized_pnl)},
+      {"maintenance_margin", number_value(maintenance_margin)},
+      {"liquidation_price", number_value(0)},
+      {"reason", "TRADE"},
+      {"margin_asset", position.margin_asset},
+      {"leverage", number_value(position.leverage)},
+      {"last_fill_quantity", number_value(fill_quantity)},
+      {"last_fill_price", number_value(fill_price)},
+  };
+
+  return make_event("PositionChanged",
+                    position.market_id,
+                    context,
+                    market_sequences,
+                    clock,
+                    std::move(payload));
+}
+
+[[nodiscard]] EngineOutputRecord make_risk_state_updated_event(
+    const IsolatedRiskState& risk,
+    const EngineEventTranslationContext& context,
+    cex::adapter::MarketSequenceGenerator& market_sequences,
+    const EngineRuntimeClock& clock) {
+  PayloadFields payload{
+      {"user_id", number_value(risk.user_id)},
+      {"position_id", position_id_text(risk.user_id, risk.market_id)},
+      {"status", risk.status},
+      {"signed_quantity", number_value(risk.signed_quantity)},
+      {"quantity", number_value(abs_quantity(risk.signed_quantity))},
+      {"average_entry_price", number_value(risk.average_entry_price)},
+      {"entry_price", number_value(risk.average_entry_price)},
+      {"mark_price", number_value(risk.mark_price)},
+      {"isolated_margin", number_value(risk.isolated_margin)},
+      {"unrealized_pnl", number_value(risk.unrealized_pnl)},
+      {"equity", number_value(risk.equity)},
+      {"maintenance_margin", number_value(risk.maintenance_margin)},
+      {"margin_ratio", number_value(risk.margin_ratio)},
+      {"margin_asset", risk.margin_asset},
+      {"leverage", number_value(risk.leverage)},
+  };
+
+  return make_event("RiskStateUpdated",
+                    risk.market_id,
+                    context,
+                    market_sequences,
+                    clock,
+                    std::move(payload));
+}
+
+void append_position_and_risk_updates(
+    EngineProcessResult& result,
+    const TradeExecuted& trade,
+    EngineEventTranslationContext& context,
+    cex::adapter::OrderMetadataStore& metadata_store,
+    IsolatedPositionMap& positions,
+    IsolatedRiskMap& risk_states,
+    const std::unordered_map<cex::adapter::MarketId, MarkPriceState>&
+        mark_prices,
+    cex::adapter::MarketSequenceGenerator& market_sequences,
+    const EngineRuntimeClock& clock) {
+  const auto timestamp_ms = clock ? clock() : 0;
+  const auto fill_quantity =
+      static_cast<std::int64_t>(trade.quantity.lots());
+  const auto fill_price = trade.price.ticks();
+
+  for (OrderId order_id : {trade.makerOrderId, trade.takerOrderId}) {
+    auto* metadata = find_metadata_mutable(order_id, context, metadata_store);
+    if (metadata == nullptr) {
+      continue;
+    }
+
+    const auto allocated_margin =
+        allocate_fill_margin(*metadata, fill_quantity, fill_price);
+    const auto key = PositionRiskKey{
+        .user_id = metadata->user_id,
+        .market_id = metadata->market_id,
+    };
+    auto& position = positions[key];
+    apply_position_fill(position,
+                        *metadata,
+                        signed_fill_quantity(*metadata, fill_quantity),
+                        fill_price,
+                        allocated_margin,
+                        timestamp_ms);
+
+    const auto risk = risk_from_position(
+        position,
+        mark_price_for(metadata->market_id, fill_price, mark_prices),
+        timestamp_ms);
+    risk_states[key] = risk;
+
+    result.events.push_back(make_position_changed_event(position,
+                                                        fill_quantity,
+                                                        fill_price,
+                                                        risk.mark_price,
+                                                        context,
+                                                        market_sequences,
+                                                        clock));
+    result.events.push_back(make_risk_state_updated_event(risk,
+                                                          context,
+                                                          market_sequences,
+                                                          clock));
+  }
 }
 
 void append_order_accepted(
@@ -202,8 +514,12 @@ void append_order_rejected(EngineProcessResult& result,
 void append_trade_executed(
     EngineProcessResult& result,
     const TradeExecuted& trade,
-    const EngineEventTranslationContext& context,
-    const cex::adapter::OrderMetadataStore& metadata_store,
+    EngineEventTranslationContext& context,
+    cex::adapter::OrderMetadataStore& metadata_store,
+    IsolatedPositionMap& positions,
+    IsolatedRiskMap& risk_states,
+    const std::unordered_map<cex::adapter::MarketId, MarkPriceState>&
+        mark_prices,
     cex::adapter::MarketSequenceGenerator& market_sequences,
     const EngineRuntimeClock& clock) {
   const auto* maker = find_metadata(trade.makerOrderId, context, metadata_store);
@@ -236,6 +552,15 @@ void append_trade_executed(
                  market_sequences,
                  clock,
                  std::move(payload)));
+  append_position_and_risk_updates(result,
+                                   trade,
+                                   context,
+                                   metadata_store,
+                                   positions,
+                                   risk_states,
+                                   mark_prices,
+                                   market_sequences,
+                                   clock);
 }
 
 void append_order_cancelled(
@@ -306,8 +631,12 @@ void append_orderbook_delta(
 
 EngineProcessResult EngineEventTranslator::translate(
     const std::vector<EngineEvent>& core_events,
-    const EngineEventTranslationContext& context,
-    const cex::adapter::OrderMetadataStore& metadata_store,
+    EngineEventTranslationContext& context,
+    cex::adapter::OrderMetadataStore& metadata_store,
+    IsolatedPositionMap& positions,
+    IsolatedRiskMap& risk_states,
+    const std::unordered_map<cex::adapter::MarketId, MarkPriceState>&
+        mark_prices,
     cex::adapter::MarketSequenceGenerator& market_sequences,
     const EngineRuntimeClock& clock) const {
   EngineProcessResult result;
@@ -333,6 +662,9 @@ EngineProcessResult EngineEventTranslator::translate(
                             *trade,
                             context,
                             metadata_store,
+                            positions,
+                            risk_states,
+                            mark_prices,
                             market_sequences,
                             clock);
       continue;

@@ -119,6 +119,33 @@ std::string place_order_json() {
 })json";
 }
 
+std::string crossing_order_json() {
+  return R"json({
+  "type": "PlaceOrder",
+  "payload": {
+    "input_id": "input_place_002",
+    "envelope": {
+      "request_id": "req_place_002",
+      "idempotency_key": "client-order-002",
+      "user_id": 43,
+      "reply_partition": 0
+    },
+    "reservation_id": "res_taker_001",
+    "order_id": 9002,
+    "market_id": 1,
+    "market_name": "SOL-PERP",
+    "side": "SHORT",
+    "order_type": "LIMIT",
+    "quantity": 10,
+    "price": 100,
+    "reduce_only": false,
+    "margin_asset": "USDC",
+    "reserved_margin_amount": 100,
+    "leverage": 10
+  }
+})json";
+}
+
 std::string cancel_order_json() {
   return R"json({
   "type": "CancelOrder",
@@ -169,6 +196,30 @@ std::string funding_rate_json() {
 })json";
 }
 
+void assert_position_and_risk_state(const EngineRuntimeStateSnapshot& snapshot) {
+  assert(snapshot.positions.size() == 2);
+  assert(snapshot.risk_states.size() == 2);
+
+  const auto maker_key = PositionRiskKey{.user_id = 42, .market_id = 1};
+  const auto taker_key = PositionRiskKey{.user_id = 43, .market_id = 1};
+  assert(snapshot.positions.at(maker_key).signed_quantity == 10);
+  assert(snapshot.positions.at(maker_key).average_entry_price == 100);
+  assert(snapshot.positions.at(maker_key).isolated_margin == 100);
+  assert(snapshot.positions.at(taker_key).signed_quantity == -10);
+  assert(snapshot.positions.at(taker_key).average_entry_price == 100);
+  assert(snapshot.positions.at(taker_key).isolated_margin == 100);
+  assert(snapshot.risk_states.at(maker_key).status == "HEALTHY");
+  assert(snapshot.risk_states.at(maker_key).unrealized_pnl == 0);
+  assert(snapshot.risk_states.at(maker_key).equity == 100);
+  assert(snapshot.risk_states.at(maker_key).maintenance_margin == 50);
+  assert(snapshot.risk_states.at(maker_key).margin_ratio == 20'000);
+  assert(snapshot.risk_states.at(taker_key).status == "HEALTHY");
+  assert(snapshot.risk_states.at(taker_key).unrealized_pnl == 0);
+  assert(snapshot.risk_states.at(taker_key).equity == 100);
+  assert(snapshot.risk_states.at(taker_key).maintenance_margin == 50);
+  assert(snapshot.risk_states.at(taker_key).margin_ratio == 20'000);
+}
+
 EngineCheckpoint make_checkpoint(std::string checkpoint_id = "checkpoint-1") {
   auto runtime = make_runtime();
   const auto result = runtime.process(make_record(place_order_json(), 1201));
@@ -183,6 +234,27 @@ EngineCheckpoint make_checkpoint(std::string checkpoint_id = "checkpoint-1") {
           .topic = EngineInputTopic,
           .partition = 0,
           .next_offset = 1202,
+      },
+      std::move(checkpoint_id));
+}
+
+EngineCheckpoint make_position_checkpoint(
+    std::string checkpoint_id = "position-checkpoint-1") {
+  auto runtime = make_runtime();
+  (void)runtime.process(make_record(place_order_json(), 1401));
+  const auto result =
+      runtime.process(make_record(crossing_order_json(), 1402));
+  assert(result.status == EngineProcessStatus::Processed);
+  assert(result.replies.size() == 1);
+  assert(result.events.size() == 6);
+
+  EngineCheckpointManager manager;
+  return manager.create_checkpoint(
+      runtime,
+      CheckpointSourcePosition{
+          .topic = EngineInputTopic,
+          .partition = 0,
+          .next_offset = 1403,
       },
       std::move(checkpoint_id));
 }
@@ -307,6 +379,23 @@ void test_checkpoint_restore_preserves_funding_rate_state() {
   assert(duplicate.duplicate->reason == EngineDuplicateReason::InputId);
   assert(duplicate.duplicate->original_offset == 1311);
   assert(restored.market_sequences().peek(1) == 2);
+}
+
+void test_checkpoint_restore_preserves_position_and_risk_state() {
+  const auto checkpoint = make_position_checkpoint();
+
+  assert(checkpoint.public_sequences.at(1) == 9);
+  assert(checkpoint.positions.size() == 2);
+  assert(checkpoint.risk_states.size() == 2);
+
+  auto restored = make_runtime();
+  EngineCheckpointManager manager;
+  manager.restore_runtime(checkpoint, restored);
+
+  const auto restored_snapshot = restored.snapshot_state();
+  assert(restored_snapshot.public_sequences.at(1) == 9);
+  assert_position_and_risk_state(restored_snapshot);
+  assert(restored.metadata_store().empty());
 }
 
 void test_checkpoint_source_position_validation_is_explicit() {
@@ -446,6 +535,7 @@ int main() {
     test_create_checkpoint_captures_recovery_state();
     test_checkpoint_restore_preserves_mark_price_state();
     test_checkpoint_restore_preserves_funding_rate_state();
+    test_checkpoint_restore_preserves_position_and_risk_state();
     test_checkpoint_source_position_validation_is_explicit();
     test_create_checkpoint_rejects_invalid_source_position();
     test_in_memory_store_saves_and_loads_latest();

@@ -312,14 +312,23 @@ EngineProcessResult EngineRuntime::process(const InboundEngineRecord& record,
       throw std::runtime_error("place order mapping did not produce metadata");
     }
 
-    const auto context =
+    auto context =
         make_translation_context(record, input, *mapped.metadata_to_record);
     auto core_events = core_.process(mapped.command);
-    auto result = translator_.translate(
-        core_events, context, metadata_store_, market_sequences_, clock_);
+    auto result = translator_.translate(core_events,
+                                        context,
+                                        metadata_store_,
+                                        positions_,
+                                        risk_states_,
+                                        mark_prices_,
+                                        market_sequences_,
+                                        clock_);
 
     if (has_order_accepted(core_events)) {
-      if (!metadata_store_.insert(*mapped.metadata_to_record)) {
+      if (!context.pending_metadata.has_value()) {
+        throw std::runtime_error("accepted order metadata was not available");
+      }
+      if (!metadata_store_.insert(*context.pending_metadata)) {
         throw std::runtime_error("accepted order metadata already exists");
       }
     }
@@ -384,10 +393,16 @@ EngineProcessResult EngineRuntime::process(const InboundEngineRecord& record,
 
   auto mapped =
       cex::adapter::map_cancel_order_to_core(input, received_sequence(record));
-  const auto context = make_translation_context(record, input);
+  auto context = make_translation_context(record, input);
   auto core_events = core_.process(mapped.command);
-  auto result = translator_.translate(
-      core_events, context, metadata_store_, market_sequences_, clock_);
+  auto result = translator_.translate(core_events,
+                                      context,
+                                      metadata_store_,
+                                      positions_,
+                                      risk_states_,
+                                      mark_prices_,
+                                      market_sequences_,
+                                      clock_);
 
   cleanup_completed_order_metadata(metadata_store_, core_events);
   mark_processed(RuntimeCommandKind::CancelOrder,
@@ -426,6 +441,14 @@ EngineRuntime::funding_rates() const noexcept {
   return funding_rates_;
 }
 
+const IsolatedPositionMap& EngineRuntime::positions() const noexcept {
+  return positions_;
+}
+
+const IsolatedRiskMap& EngineRuntime::risk_states() const noexcept {
+  return risk_states_;
+}
+
 EngineRuntimeStateSnapshot EngineRuntime::snapshot_state() const {
   EngineRuntimeStateSnapshot snapshot{
       .core_snapshot = core_.snapshot(),
@@ -433,6 +456,8 @@ EngineRuntimeStateSnapshot EngineRuntime::snapshot_state() const {
       .public_sequences = market_sequences_.snapshot(),
       .mark_prices = mark_prices_,
       .funding_rates = funding_rates_,
+      .positions = positions_,
+      .risk_states = risk_states_,
   };
 
   for (const auto& [key, processed] : processed_input_ids_) {
@@ -477,6 +502,8 @@ void EngineRuntime::restore_state(
 
   mark_prices_ = snapshot.mark_prices;
   funding_rates_ = snapshot.funding_rates;
+  positions_ = snapshot.positions;
+  risk_states_ = snapshot.risk_states;
 
   processed_input_ids_.clear();
   for (const auto& [key, processed] : snapshot.processed_input_ids) {

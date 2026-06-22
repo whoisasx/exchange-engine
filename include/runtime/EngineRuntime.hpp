@@ -21,17 +21,6 @@ struct EngineRuntimeProcessedRequestSnapshot {
   std::string idempotency_key;
 };
 
-struct MarkPriceState {
-  cex::adapter::MarketId market_id{0};
-  cex::adapter::AdapterPrice mark_price{0};
-  cex::adapter::AdapterPrice index_price{0};
-  std::int64_t source_timestamp_ms{0};
-  std::int64_t published_at_ms{0};
-  std::int64_t valid_until_ms{0};
-  std::int64_t source_sequence{0};
-  std::string source_status;
-};
-
 struct FundingRateState {
   cex::adapter::MarketId market_id{0};
   std::string funding_interval_id;
@@ -48,6 +37,8 @@ struct EngineRuntimeStateSnapshot {
   std::unordered_map<cex::adapter::MarketId, EngineSequence> public_sequences;
   std::unordered_map<cex::adapter::MarketId, MarkPriceState> mark_prices;
   std::unordered_map<cex::adapter::MarketId, FundingRateState> funding_rates;
+  IsolatedPositionMap positions;
+  IsolatedRiskMap risk_states;
   std::unordered_map<std::string, EngineRuntimeProcessedRequestSnapshot>
       processed_input_ids;
   std::unordered_map<std::string, EngineRuntimeProcessedRequestSnapshot>
@@ -77,6 +68,8 @@ class EngineRuntime {
   [[nodiscard]] const std::unordered_map<cex::adapter::MarketId,
                                          FundingRateState>&
   funding_rates() const noexcept;
+  [[nodiscard]] const IsolatedPositionMap& positions() const noexcept;
+  [[nodiscard]] const IsolatedRiskMap& risk_states() const noexcept;
   [[nodiscard]] EngineRuntimeStateSnapshot snapshot_state() const;
   void restore_state(const EngineRuntimeStateSnapshot& snapshot);
 
@@ -125,6 +118,8 @@ class EngineRuntime {
   EngineEventTranslator translator_;
   std::unordered_map<cex::adapter::MarketId, MarkPriceState> mark_prices_;
   std::unordered_map<cex::adapter::MarketId, FundingRateState> funding_rates_;
+  IsolatedPositionMap positions_;
+  IsolatedRiskMap risk_states_;
   std::unordered_map<std::string, ProcessedRuntimeRequest>
       processed_input_ids_;
   std::unordered_map<std::string, ProcessedRuntimeRequest>

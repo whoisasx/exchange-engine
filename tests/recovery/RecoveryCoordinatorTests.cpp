@@ -658,7 +658,7 @@ void test_replay_recovery_matches_uninterrupted_runtime() {
       runtime_a.process(make_runtime_record(crossing_order, 1201));
   assert(live_crossing.status == cex::runtime::EngineProcessStatus::Processed);
   assert(live_crossing.replies.size() == 1);
-  assert(live_crossing.events.size() == 2);
+  assert(live_crossing.events.size() == 6);
   assert_book_does_not_have_order(runtime_a, 9001);
   assert_book_does_not_have_order(runtime_a, 9002);
 
@@ -668,7 +668,7 @@ void test_replay_recovery_matches_uninterrupted_runtime() {
   assert(live_mark.replies.empty());
   assert(live_mark.events.size() == 1);
   assert(live_mark.events[0].type == "MarkPriceUpdated");
-  assert(live_mark.events[0].payload.at("engine_sequence") == "5");
+  assert(live_mark.events[0].payload.at("engine_sequence") == "9");
   assert_mark_price_state(runtime_a.mark_prices().at(1), 101, 100, 45'002);
 
   const auto live_funding =
@@ -678,7 +678,7 @@ void test_replay_recovery_matches_uninterrupted_runtime() {
   assert(live_funding.replies.empty());
   assert(live_funding.events.size() == 1);
   assert(live_funding.events[0].type == "FundingRateUpdated");
-  assert(live_funding.events[0].payload.at("engine_sequence") == "6");
+  assert(live_funding.events[0].payload.at("engine_sequence") == "10");
   assert_funding_rate_state(runtime_a.funding_rates().at(1), 27, 1'000'000);
 
   const auto live_post_resting =
@@ -755,7 +755,7 @@ void test_replay_recovery_matches_uninterrupted_runtime() {
   assert_book_does_not_have_order(runtime_b, 9201);
   assert(runtime_a.market_sequences().peek(1) ==
          runtime_b.market_sequences().peek(1));
-  assert(runtime_a.market_sequences().peek(1) == 11);
+  assert(runtime_a.market_sequences().peek(1) == 15);
   assert_mark_price_state(runtime_b.mark_prices().at(1), 101, 100, 45'002);
   assert_funding_rate_state(runtime_b.funding_rates().at(1), 27, 1'000'000);
 
@@ -782,6 +782,10 @@ void test_replay_recovery_matches_uninterrupted_runtime() {
   assert(live_snapshot.funding_rates.size() == 1);
   assert_funding_rate_state(live_snapshot.funding_rates.at(1), 27, 1'000'000);
   assert_funding_rate_state(replayed_snapshot.funding_rates.at(1), 27, 1'000'000);
+  assert(live_snapshot.positions == replayed_snapshot.positions);
+  assert(live_snapshot.risk_states == replayed_snapshot.risk_states);
+  assert(live_snapshot.positions.size() == 2);
+  assert(live_snapshot.risk_states.size() == 2);
   assert(live_snapshot.processed_input_ids.size() == 6);
   assert(live_snapshot.processed_idempotency_keys.size() == 4);
 
@@ -860,9 +864,9 @@ void test_replay_recovery_matches_uninterrupted_runtime() {
   assert(next_live_a.replies.size() == 1);
   assert(next_live_a.events.size() == 2);
   assert(next_live_a.events[0].type == "OrderOpened");
-  assert(next_live_a.events[0].payload.at("engine_sequence") == "11");
+  assert(next_live_a.events[0].payload.at("engine_sequence") == "15");
   assert(next_live_a.events[1].type == "OrderBookDelta");
-  assert(next_live_a.events[1].payload.at("engine_sequence") == "12");
+  assert(next_live_a.events[1].payload.at("engine_sequence") == "16");
   assert_book_has_order(runtime_a, 9301);
   assert_book_has_order(runtime_b, 9301);
 }

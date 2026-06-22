@@ -367,14 +367,22 @@ void run_resting_crossing_and_duplicate_smoke() {
       process_and_publish(runtime, crossing_order_json(), 1202);
   require(crossing.result.status == EngineProcessStatus::Processed,
           "crossing order was not processed");
-  require_eq(static_cast<std::int64_t>(crossing.published.size()), 3,
+  require_eq(static_cast<std::int64_t>(crossing.published.size()), 7,
              "crossing published count");
   require_eq(crossing.published[0].record.type, "OrderAccepted",
              "crossing first output");
   require_eq(crossing.published[1].record.type, "TradeExecuted",
              "crossing second output");
-  require_eq(crossing.published[2].record.type, "OrderBookDelta",
+  require_eq(crossing.published[2].record.type, "PositionChanged",
              "crossing third output");
+  require_eq(crossing.published[3].record.type, "RiskStateUpdated",
+             "crossing fourth output");
+  require_eq(crossing.published[4].record.type, "PositionChanged",
+             "crossing fifth output");
+  require_eq(crossing.published[5].record.type, "RiskStateUpdated",
+             "crossing sixth output");
+  require_eq(crossing.published[6].record.type, "OrderBookDelta",
+             "crossing seventh output");
   require_no_published_type(crossing.published, "OrderOpened");
 
   const auto& crossing_reply =
@@ -407,11 +415,67 @@ void run_resting_crossing_and_duplicate_smoke() {
              0,
              "trade settlements count");
 
+  const auto maker_position_message =
+      parse_published_output(crossing.published[2]);
+  require_payload(maker_position_message, "engine_sequence", "4");
+  require_payload(maker_position_message, "position_id", "pos_42_1");
+  require_payload(maker_position_message, "user_id", "42");
+  require_payload(maker_position_message, "side", "LONG");
+  require_payload(maker_position_message, "signed_quantity", "10");
+  require_payload(maker_position_message, "average_entry_price", "100");
+  require_payload(maker_position_message, "mark_price", "100");
+  require_payload(maker_position_message, "isolated_margin", "100");
+  require_payload(maker_position_message, "realized_pnl", "0");
+  require_payload(maker_position_message, "unrealized_pnl", "0");
+  require_payload(maker_position_message, "maintenance_margin", "50");
+  require_payload(maker_position_message, "liquidation_price", "0");
+  require_payload(maker_position_message, "reason", "TRADE");
+
+  const auto maker_risk_message =
+      parse_published_output(crossing.published[3]);
+  require_payload(maker_risk_message, "engine_sequence", "5");
+  require_payload(maker_risk_message, "position_id", "pos_42_1");
+  require_payload(maker_risk_message, "user_id", "42");
+  require_payload(maker_risk_message, "status", "HEALTHY");
+  require_payload(maker_risk_message, "mark_price", "100");
+  require_payload(maker_risk_message, "unrealized_pnl", "0");
+  require_payload(maker_risk_message, "equity", "100");
+  require_payload(maker_risk_message, "maintenance_margin", "50");
+  require_payload(maker_risk_message, "margin_ratio", "20000");
+
+  const auto taker_position_message =
+      parse_published_output(crossing.published[4]);
+  require_payload(taker_position_message, "engine_sequence", "6");
+  require_payload(taker_position_message, "position_id", "pos_43_1");
+  require_payload(taker_position_message, "user_id", "43");
+  require_payload(taker_position_message, "side", "SHORT");
+  require_payload(taker_position_message, "signed_quantity", "-10");
+  require_payload(taker_position_message, "average_entry_price", "100");
+  require_payload(taker_position_message, "mark_price", "100");
+  require_payload(taker_position_message, "isolated_margin", "100");
+  require_payload(taker_position_message, "realized_pnl", "0");
+  require_payload(taker_position_message, "unrealized_pnl", "0");
+  require_payload(taker_position_message, "maintenance_margin", "50");
+  require_payload(taker_position_message, "liquidation_price", "0");
+  require_payload(taker_position_message, "reason", "TRADE");
+
+  const auto taker_risk_message =
+      parse_published_output(crossing.published[5]);
+  require_payload(taker_risk_message, "engine_sequence", "7");
+  require_payload(taker_risk_message, "position_id", "pos_43_1");
+  require_payload(taker_risk_message, "user_id", "43");
+  require_payload(taker_risk_message, "status", "HEALTHY");
+  require_payload(taker_risk_message, "mark_price", "100");
+  require_payload(taker_risk_message, "unrealized_pnl", "0");
+  require_payload(taker_risk_message, "equity", "100");
+  require_payload(taker_risk_message, "maintenance_margin", "50");
+  require_payload(taker_risk_message, "margin_ratio", "20000");
+
   const auto& crossing_delta =
       require_published_type(crossing.published, "OrderBookDelta");
   require_event_routing(crossing_delta);
   const auto crossing_delta_message = parse_published_output(crossing_delta);
-  require_payload(crossing_delta_message, "engine_sequence", "4");
+  require_payload(crossing_delta_message, "engine_sequence", "8");
   require_payload(crossing_delta_message, "side", "LONG");
   require_payload(crossing_delta_message, "price", "100");
   require_payload(crossing_delta_message, "quantity", "0");
@@ -430,7 +494,7 @@ void run_resting_crossing_and_duplicate_smoke() {
              "crossing delta asks count");
   require(runtime.metadata_store().empty(),
           "filled maker metadata was not cleaned up");
-  require_eq(static_cast<std::int64_t>(runtime.market_sequences().peek(1)), 5,
+  require_eq(static_cast<std::int64_t>(runtime.market_sequences().peek(1)), 9,
              "next market sequence after trade");
 
   const auto duplicate =
