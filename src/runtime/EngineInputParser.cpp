@@ -227,6 +227,12 @@ ParsedEngineInput EngineInputParser::parse(std::string_view raw_json) const {
         .value = parse_mark_price_updated(message),
     };
   }
+  if (message.type == "FundingRateUpdated") {
+    return ParsedEngineInput{
+        .kind = ParsedEngineInputKind::FundingRateUpdated,
+        .value = parse_funding_rate_updated(message),
+    };
+  }
 
   throw parser_error("unsupported engine input type '" + message.type + "'");
 }
@@ -297,6 +303,40 @@ EngineInputParser::parse_mark_price_updated(
       .source_status = require_payload_string(message, "source_status"),
       .source = std::nullopt,
   };
+}
+
+cex::adapter::FundingRateUpdatedInput
+EngineInputParser::parse_funding_rate_updated(
+    const protocol::ProtocolMessage& message) const {
+  if (message.type != "FundingRateUpdated") {
+    throw parser_error("expected FundingRateUpdated message");
+  }
+
+  const auto& payload = message.payload;
+  auto input = cex::adapter::FundingRateUpdatedInput{
+      .input_id = optional_payload_string(message, "input_id"),
+      .market_id = require_i64(payload, "market_id", "payload"),
+      .funding_interval_id =
+          require_payload_string(message, "funding_interval_id"),
+      .rate = require_i64(payload, "rate", "payload"),
+      .rate_scale = require_i64(payload, "rate_scale", "payload"),
+      .interval_start_ms =
+          require_i64(payload, "interval_start_ms", "payload"),
+      .interval_end_ms = require_i64(payload, "interval_end_ms", "payload"),
+      .source_timestamp_ms =
+          require_i64(payload, "source_timestamp_ms", "payload"),
+      .source = std::nullopt,
+  };
+
+  if (input.rate_scale <= 0) {
+    throw parser_error("payload.rate_scale must be greater than zero");
+  }
+  if (input.interval_end_ms <= input.interval_start_ms) {
+    throw parser_error(
+        "payload.interval_end_ms must be greater than interval_start_ms");
+  }
+
+  return input;
 }
 
 }  // namespace cex::runtime

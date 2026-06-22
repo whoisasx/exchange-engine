@@ -81,6 +81,17 @@ void assert_mark_price_state(const MarkPriceState& state) {
   assert(state.source_status == "VALID");
 }
 
+void assert_funding_rate_state(const FundingRateState& state) {
+  assert(state.market_id == 1);
+  assert(state.funding_interval_id ==
+         "funding_SOL-PERP_1710000000_1710028800");
+  assert(state.rate == 25);
+  assert(state.rate_scale == 1'000'000);
+  assert(state.interval_start_ms == 1'710'000'000'000LL);
+  assert(state.interval_end_ms == 1'710'028'800'000LL);
+  assert(state.source_timestamp_ms == 1'710'000'001'000LL);
+}
+
 std::string place_order_json() {
   return R"json({
   "type": "PlaceOrder",
@@ -142,6 +153,22 @@ std::string mark_price_json() {
 })json";
 }
 
+std::string funding_rate_json() {
+  return R"json({
+  "type": "FundingRateUpdated",
+  "payload": {
+    "input_id": "input_funding_rate_001",
+    "market_id": 1,
+    "funding_interval_id": "funding_SOL-PERP_1710000000_1710028800",
+    "rate": 25,
+    "rate_scale": 1000000,
+    "interval_start_ms": 1710000000000,
+    "interval_end_ms": 1710028800000,
+    "source_timestamp_ms": 1710000001000
+  }
+})json";
+}
+
 EngineCheckpoint make_checkpoint(std::string checkpoint_id = "checkpoint-1") {
   auto runtime = make_runtime();
   const auto result = runtime.process(make_record(place_order_json(), 1201));
@@ -175,6 +202,25 @@ EngineCheckpoint make_mark_checkpoint(
           .topic = EngineInputTopic,
           .partition = 0,
           .next_offset = 1302,
+      },
+      std::move(checkpoint_id));
+}
+
+EngineCheckpoint make_funding_checkpoint(
+    std::string checkpoint_id = "funding-checkpoint-1") {
+  auto runtime = make_runtime();
+  const auto result = runtime.process(make_record(funding_rate_json(), 1311));
+  assert(result.status == EngineProcessStatus::Processed);
+  assert(result.replies.empty());
+  assert(result.events.size() == 1);
+
+  EngineCheckpointManager manager;
+  return manager.create_checkpoint(
+      runtime,
+      CheckpointSourcePosition{
+          .topic = EngineInputTopic,
+          .partition = 0,
+          .next_offset = 1312,
       },
       std::move(checkpoint_id));
 }
@@ -228,6 +274,38 @@ void test_checkpoint_restore_preserves_mark_price_state() {
   assert(duplicate.duplicate.has_value());
   assert(duplicate.duplicate->reason == EngineDuplicateReason::InputId);
   assert(duplicate.duplicate->original_offset == 1301);
+  assert(restored.market_sequences().peek(1) == 2);
+}
+
+void test_checkpoint_restore_preserves_funding_rate_state() {
+  const auto checkpoint = make_funding_checkpoint();
+
+  assert(checkpoint.public_sequences.at(1) == 2);
+  assert(checkpoint.funding_rates.contains(1));
+  assert_funding_rate_state(checkpoint.funding_rates.at(1));
+  assert(checkpoint.processed_input_ids.contains("input_funding_rate_001"));
+  assert(checkpoint.processed_input_ids.at("input_funding_rate_001")
+             .command_kind == RuntimeCommandKind::FundingRateUpdated);
+  assert(checkpoint.processed_input_ids.at("input_funding_rate_001")
+             .idempotency_key.empty());
+  assert(checkpoint.processed_idempotency_keys.empty());
+
+  auto restored = make_runtime();
+  EngineCheckpointManager manager;
+  manager.restore_runtime(checkpoint, restored);
+
+  const auto restored_snapshot = restored.snapshot_state();
+  assert(restored_snapshot.public_sequences.at(1) == 2);
+  assert(restored_snapshot.funding_rates.contains(1));
+  assert_funding_rate_state(restored_snapshot.funding_rates.at(1));
+
+  const auto duplicate =
+      restored.process_replay(make_record(funding_rate_json(), 1311));
+  assert(duplicate.status == EngineProcessStatus::Duplicate);
+  assert(duplicate.empty());
+  assert(duplicate.duplicate.has_value());
+  assert(duplicate.duplicate->reason == EngineDuplicateReason::InputId);
+  assert(duplicate.duplicate->original_offset == 1311);
   assert(restored.market_sequences().peek(1) == 2);
 }
 
@@ -367,6 +445,7 @@ int main() {
   try {
     test_create_checkpoint_captures_recovery_state();
     test_checkpoint_restore_preserves_mark_price_state();
+    test_checkpoint_restore_preserves_funding_rate_state();
     test_checkpoint_source_position_validation_is_explicit();
     test_create_checkpoint_rejects_invalid_source_position();
     test_in_memory_store_saves_and_loads_latest();

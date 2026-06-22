@@ -234,6 +234,8 @@ template <typename Enum>
       return cex::runtime::RuntimeCommandKind::CancelOrder;
     case static_cast<int>(cex::runtime::RuntimeCommandKind::MarkPriceUpdated):
       return cex::runtime::RuntimeCommandKind::MarkPriceUpdated;
+    case static_cast<int>(cex::runtime::RuntimeCommandKind::FundingRateUpdated):
+      return cex::runtime::RuntimeCommandKind::FundingRateUpdated;
     default:
       throw CheckpointParseError("invalid runtime command kind");
   }
@@ -365,6 +367,26 @@ sorted_mark_prices(
                              cex::runtime::MarkPriceState>& entries) {
   std::vector<
       std::pair<cex::adapter::MarketId, cex::runtime::MarkPriceState>>
+      sorted;
+  sorted.reserve(entries.size());
+  for (const auto& [market_id, state] : entries) {
+    sorted.emplace_back(market_id, state);
+  }
+  std::sort(sorted.begin(),
+            sorted.end(),
+            [](const auto& left, const auto& right) {
+              return left.first < right.first;
+            });
+  return sorted;
+}
+
+[[nodiscard]] std::vector<
+    std::pair<cex::adapter::MarketId, cex::runtime::FundingRateState>>
+sorted_funding_rates(
+    const std::unordered_map<cex::adapter::MarketId,
+                             cex::runtime::FundingRateState>& entries) {
+  std::vector<
+      std::pair<cex::adapter::MarketId, cex::runtime::FundingRateState>>
       sorted;
   sorted.reserve(entries.size());
   for (const auto& [market_id, state] : entries) {
@@ -614,6 +636,26 @@ void write_mark_prices(
   }
 }
 
+void write_funding_rates(
+    std::ostream& out,
+    const std::unordered_map<cex::adapter::MarketId,
+                             cex::runtime::FundingRateState>& entries) {
+  const auto sorted = sorted_funding_rates(entries);
+  write_line(out, {"funding_rates", std::to_string(sorted.size())});
+
+  for (const auto& [market_id, state] : sorted) {
+    write_line(out,
+               {"funding_rate_state",
+                std::to_string(market_id),
+                escape_field(state.funding_interval_id),
+                std::to_string(state.rate),
+                std::to_string(state.rate_scale),
+                std::to_string(state.interval_start_ms),
+                std::to_string(state.interval_end_ms),
+                std::to_string(state.source_timestamp_ms)});
+  }
+}
+
 void write_checkpoint(std::ostream& out, const EngineCheckpoint& checkpoint) {
   out << kMagic << '\n';
 
@@ -652,6 +694,7 @@ void write_checkpoint(std::ostream& out, const EngineCheckpoint& checkpoint) {
   }
 
   write_mark_prices(out, checkpoint.mark_prices);
+  write_funding_rates(out, checkpoint.funding_rates);
   write_metadata_store(out, checkpoint);
   write_processed_requests(
       out, "processed_input_ids", checkpoint.processed_input_ids);
@@ -710,15 +753,20 @@ class CheckpointReader {
     checkpoint.core_snapshot.idempotencyState = read_idempotency_snapshot();
     checkpoint.public_sequences = read_public_sequences();
 
-    const auto after_public_sequences = read_fields_any();
-    if (!after_public_sequences.empty() &&
-        after_public_sequences.front() == "mark_prices") {
-      checkpoint.mark_prices = read_mark_prices(after_public_sequences);
-      checkpoint.metadata_store = read_metadata_store();
-    } else if (!after_public_sequences.empty() &&
-               after_public_sequences.front() == "metadata") {
+    auto section = read_fields_any();
+    if (!section.empty() && section.front() == "mark_prices") {
+      checkpoint.mark_prices = read_mark_prices(section);
+      section = read_fields_any();
+    }
+
+    if (!section.empty() && section.front() == "funding_rates") {
+      checkpoint.funding_rates = read_funding_rates(section);
+      section = read_fields_any();
+    }
+
+    if (!section.empty() && section.front() == "metadata") {
       checkpoint.metadata_store =
-          read_metadata_store(after_public_sequences);
+          read_metadata_store(section);
     } else {
       throw CheckpointParseError("unexpected checkpoint section");
     }
@@ -1022,6 +1070,38 @@ class CheckpointReader {
     }
 
     return mark_prices;
+  }
+
+  [[nodiscard]] std::unordered_map<cex::adapter::MarketId,
+                                   cex::runtime::FundingRateState>
+  read_funding_rates(const std::vector<std::string>& count_fields) {
+    const std::size_t count =
+        count_from_fields(count_fields, "funding_rates");
+    std::unordered_map<cex::adapter::MarketId,
+                       cex::runtime::FundingRateState>
+        funding_rates;
+    funding_rates.reserve(count);
+
+    for (std::size_t index = 0; index < count; ++index) {
+      const auto fields = read_fields("funding_rate_state");
+      require_field_count(fields, 8);
+
+      cex::runtime::FundingRateState state{
+          .market_id = parse_integer<cex::adapter::MarketId>(fields[1]),
+          .funding_interval_id = unescape_field(fields[2]),
+          .rate = parse_integer<std::int64_t>(fields[3]),
+          .rate_scale = parse_integer<std::int64_t>(fields[4]),
+          .interval_start_ms = parse_integer<std::int64_t>(fields[5]),
+          .interval_end_ms = parse_integer<std::int64_t>(fields[6]),
+          .source_timestamp_ms = parse_integer<std::int64_t>(fields[7]),
+      };
+
+      if (!funding_rates.emplace(state.market_id, std::move(state)).second) {
+        throw CheckpointParseError("duplicate funding rate market id");
+      }
+    }
+
+    return funding_rates;
   }
 
   [[nodiscard]] cex::adapter::OrderMetadataStore read_metadata_store() {

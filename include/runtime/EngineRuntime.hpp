@@ -32,11 +32,22 @@ struct MarkPriceState {
   std::string source_status;
 };
 
+struct FundingRateState {
+  cex::adapter::MarketId market_id{0};
+  std::string funding_interval_id;
+  std::int64_t rate{0};
+  std::int64_t rate_scale{0};
+  std::int64_t interval_start_ms{0};
+  std::int64_t interval_end_ms{0};
+  std::int64_t source_timestamp_ms{0};
+};
+
 struct EngineRuntimeStateSnapshot {
   EngineSnapshot core_snapshot;
   cex::adapter::OrderMetadataStore metadata_store;
   std::unordered_map<cex::adapter::MarketId, EngineSequence> public_sequences;
   std::unordered_map<cex::adapter::MarketId, MarkPriceState> mark_prices;
+  std::unordered_map<cex::adapter::MarketId, FundingRateState> funding_rates;
   std::unordered_map<std::string, EngineRuntimeProcessedRequestSnapshot>
       processed_input_ids;
   std::unordered_map<std::string, EngineRuntimeProcessedRequestSnapshot>
@@ -63,6 +74,9 @@ class EngineRuntime {
   [[nodiscard]] const std::unordered_map<cex::adapter::MarketId,
                                          MarkPriceState>&
   mark_prices() const noexcept;
+  [[nodiscard]] const std::unordered_map<cex::adapter::MarketId,
+                                         FundingRateState>&
+  funding_rates() const noexcept;
   [[nodiscard]] EngineRuntimeStateSnapshot snapshot_state() const;
   void restore_state(const EngineRuntimeStateSnapshot& snapshot);
 
@@ -110,6 +124,7 @@ class EngineRuntime {
   EngineInputParser parser_;
   EngineEventTranslator translator_;
   std::unordered_map<cex::adapter::MarketId, MarkPriceState> mark_prices_;
+  std::unordered_map<cex::adapter::MarketId, FundingRateState> funding_rates_;
   std::unordered_map<std::string, ProcessedRuntimeRequest>
       processed_input_ids_;
   std::unordered_map<std::string, ProcessedRuntimeRequest>

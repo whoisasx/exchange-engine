@@ -49,7 +49,7 @@ void append_json_string(std::ostream& output, std::string_view value) {
 }
 
 [[nodiscard]] bool is_integer_payload_field(std::string_view field) {
-  static constexpr std::array<std::string_view, 33> fields{
+  static constexpr std::array<std::string_view, 37> fields{
       "account_id",
       "amount",
       "base_asset_id",
@@ -59,6 +59,8 @@ void append_json_string(std::ostream& output, std::string_view value) {
       "engine_timestamp_ms",
       "fill_id",
       "index_price",
+      "interval_end_ms",
+      "interval_start_ms",
       "leverage",
       "maker_order_id",
       "maker_user_id",
@@ -82,6 +84,8 @@ void append_json_string(std::ostream& output, std::string_view value) {
       "exit_price",
       "mark_price",
       "published_at_ms",
+      "rate",
+      "rate_scale",
       "valid_until_ms",
   };
 

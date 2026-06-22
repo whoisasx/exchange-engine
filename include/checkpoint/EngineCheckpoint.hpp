@@ -30,6 +30,8 @@ struct EngineCheckpoint {
   std::unordered_map<cex::adapter::MarketId, EngineSequence> public_sequences;
   std::unordered_map<cex::adapter::MarketId, cex::runtime::MarkPriceState>
       mark_prices;
+  std::unordered_map<cex::adapter::MarketId, cex::runtime::FundingRateState>
+      funding_rates;
   cex::adapter::OrderMetadataStore metadata_store;
   std::unordered_map<std::string,
                      cex::runtime::EngineRuntimeProcessedRequestSnapshot>

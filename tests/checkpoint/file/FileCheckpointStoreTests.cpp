@@ -104,6 +104,17 @@ void assert_mark_price_state(const MarkPriceState& state) {
   assert(state.source_status == "VALID");
 }
 
+void assert_funding_rate_state(const FundingRateState& state) {
+  assert(state.market_id == 1);
+  assert(state.funding_interval_id ==
+         "funding_SOL-PERP_1710000000_1710028800");
+  assert(state.rate == 25);
+  assert(state.rate_scale == 1'000'000);
+  assert(state.interval_start_ms == 1'710'000'000'000LL);
+  assert(state.interval_end_ms == 1'710'028'800'000LL);
+  assert(state.source_timestamp_ms == 1'710'000'001'000LL);
+}
+
 std::string place_order_json() {
   return R"json({
   "type": "PlaceOrder",
@@ -165,6 +176,22 @@ std::string mark_price_json() {
 })json";
 }
 
+std::string funding_rate_json() {
+  return R"json({
+  "type": "FundingRateUpdated",
+  "payload": {
+    "input_id": "input_funding_rate_001",
+    "market_id": 1,
+    "funding_interval_id": "funding_SOL-PERP_1710000000_1710028800",
+    "rate": 25,
+    "rate_scale": 1000000,
+    "interval_start_ms": 1710000000000,
+    "interval_end_ms": 1710028800000,
+    "source_timestamp_ms": 1710000001000
+  }
+})json";
+}
+
 EngineCheckpoint make_checkpoint(std::string checkpoint_id) {
   auto runtime = make_runtime();
   const auto result = runtime.process(make_record(place_order_json(), 1201));
@@ -193,6 +220,22 @@ EngineCheckpoint make_mark_checkpoint(std::string checkpoint_id) {
           .topic = EngineInputTopic,
           .partition = 0,
           .next_offset = 1302,
+      },
+      std::move(checkpoint_id));
+}
+
+EngineCheckpoint make_funding_checkpoint(std::string checkpoint_id) {
+  auto runtime = make_runtime();
+  const auto result = runtime.process(make_record(funding_rate_json(), 1311));
+  assert(result.status == EngineProcessStatus::Processed);
+
+  EngineCheckpointManager manager;
+  return manager.create_checkpoint(
+      runtime,
+      CheckpointSourcePosition{
+          .topic = EngineInputTopic,
+          .partition = 0,
+          .next_offset = 1312,
       },
       std::move(checkpoint_id));
 }
@@ -292,6 +335,40 @@ void test_file_store_persists_and_restores_mark_state() {
   assert(restored.market_sequences().peek(1) == 2);
 }
 
+void test_file_store_persists_and_restores_funding_rate_state() {
+  TempDirectory temp;
+  FileCheckpointStore store(temp.path);
+
+  store.save(make_funding_checkpoint("checkpoint-0003"));
+
+  const auto loaded = store.load_latest();
+  assert(loaded.has_value());
+  assert(loaded->checkpoint_id == "checkpoint-0003");
+  assert(loaded->source_position.next_offset == 1312);
+  assert(loaded->public_sequences.at(1) == 2);
+  assert(loaded->funding_rates.contains(1));
+  assert_funding_rate_state(loaded->funding_rates.at(1));
+  assert(loaded->processed_input_ids.contains("input_funding_rate_001"));
+  assert(loaded->processed_input_ids.at("input_funding_rate_001")
+             .command_kind == RuntimeCommandKind::FundingRateUpdated);
+  assert(loaded->processed_idempotency_keys.empty());
+
+  auto restored = make_runtime();
+  EngineCheckpointManager manager;
+  manager.restore_runtime(*loaded, restored);
+
+  const auto snapshot = restored.snapshot_state();
+  assert(snapshot.public_sequences.at(1) == 2);
+  assert(snapshot.funding_rates.contains(1));
+  assert_funding_rate_state(snapshot.funding_rates.at(1));
+
+  const auto duplicate =
+      restored.process_replay(make_record(funding_rate_json(), 1311));
+  assert(duplicate.status == EngineProcessStatus::Duplicate);
+  assert(duplicate.empty());
+  assert(restored.market_sequences().peek(1) == 2);
+}
+
 }  // namespace
 
 int main() {
@@ -300,6 +377,7 @@ int main() {
     test_file_store_returns_nullopt_for_corrupted_latest_file();
     test_file_store_persists_and_restores_resting_order_cancel();
     test_file_store_persists_and_restores_mark_state();
+    test_file_store_persists_and_restores_funding_rate_state();
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';
     return EXIT_FAILURE;

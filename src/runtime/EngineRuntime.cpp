@@ -95,6 +95,19 @@ template <typename Value>
   };
 }
 
+[[nodiscard]] FundingRateState funding_rate_state_from_input(
+    const cex::adapter::FundingRateUpdatedInput& input) {
+  return FundingRateState{
+      .market_id = input.market_id,
+      .funding_interval_id = input.funding_interval_id,
+      .rate = input.rate,
+      .rate_scale = input.rate_scale,
+      .interval_start_ms = input.interval_start_ms,
+      .interval_end_ms = input.interval_end_ms,
+      .source_timestamp_ms = input.source_timestamp_ms,
+  };
+}
+
 [[nodiscard]] EngineOutputRecord make_mark_price_updated_event(
     const InboundEngineRecord& record,
     const cex::adapter::MarkPriceUpdatedInput& input,
@@ -120,6 +133,37 @@ template <typename Value>
   return EngineOutputRecord{
       .topic = EngineEventsTopic,
       .type = "MarkPriceUpdated",
+      .key = text(input.market_id),
+      .partition = std::nullopt,
+      .payload = std::move(payload),
+  };
+}
+
+[[nodiscard]] EngineOutputRecord make_funding_rate_updated_event(
+    const InboundEngineRecord& record,
+    const cex::adapter::FundingRateUpdatedInput& input,
+    cex::adapter::MarketSequenceGenerator& market_sequences,
+    const EngineRuntimeClock& clock) {
+  const EngineSequence sequence = market_sequences.next(input.market_id);
+  PayloadFields payload{
+      {"engine_sequence", text(sequence)},
+      {"engine_event_id", "eng_" + text(input.market_id) + "_" + text(sequence)},
+      {"engine_timestamp_ms", text(clock ? clock() : 0)},
+      {"source_input_offset", text(record.offset)},
+      {"market_id", text(input.market_id)},
+      {"funding_interval_id", input.funding_interval_id},
+      {"rate", text(input.rate)},
+      {"rate_scale", text(input.rate_scale)},
+      {"interval_start_ms", text(input.interval_start_ms)},
+      {"interval_end_ms", text(input.interval_end_ms)},
+  };
+  if (input.input_id.has_value()) {
+    payload.emplace("source_input_id", *input.input_id);
+  }
+
+  return EngineOutputRecord{
+      .topic = EngineEventsTopic,
+      .type = "FundingRateUpdated",
       .key = text(input.market_id),
       .partition = std::nullopt,
       .payload = std::move(payload),
@@ -307,6 +351,27 @@ EngineProcessResult EngineRuntime::process(const InboundEngineRecord& record,
     return apply_processing_mode(std::move(result), mode);
   }
 
+  if (parsed.kind == ParsedEngineInputKind::FundingRateUpdated) {
+    auto input =
+        std::get<cex::adapter::FundingRateUpdatedInput>(parsed.value);
+    if (auto duplicate = duplicate_input_result_for(input.input_id);
+        duplicate.has_value()) {
+      return *duplicate;
+    }
+
+    input.source = broker_context(record);
+
+    auto state = funding_rate_state_from_input(input);
+    EngineProcessResult result;
+    result.events.push_back(make_funding_rate_updated_event(
+        record, input, market_sequences_, clock_));
+    funding_rates_[input.market_id] = std::move(state);
+    mark_input_processed(RuntimeCommandKind::FundingRateUpdated,
+                         record,
+                         input.input_id);
+    return apply_processing_mode(std::move(result), mode);
+  }
+
   auto input = std::get<cex::adapter::CancelOrderInput>(parsed.value);
   if (auto duplicate = duplicate_result_for(input.input_id,
                                             input.envelope.idempotency_key);
@@ -356,12 +421,18 @@ EngineRuntime::mark_prices() const noexcept {
   return mark_prices_;
 }
 
+const std::unordered_map<cex::adapter::MarketId, FundingRateState>&
+EngineRuntime::funding_rates() const noexcept {
+  return funding_rates_;
+}
+
 EngineRuntimeStateSnapshot EngineRuntime::snapshot_state() const {
   EngineRuntimeStateSnapshot snapshot{
       .core_snapshot = core_.snapshot(),
       .metadata_store = metadata_store_,
       .public_sequences = market_sequences_.snapshot(),
       .mark_prices = mark_prices_,
+      .funding_rates = funding_rates_,
   };
 
   for (const auto& [key, processed] : processed_input_ids_) {
@@ -405,6 +476,7 @@ void EngineRuntime::restore_state(
   }
 
   mark_prices_ = snapshot.mark_prices;
+  funding_rates_ = snapshot.funding_rates;
 
   processed_input_ids_.clear();
   for (const auto& [key, processed] : snapshot.processed_input_ids) {

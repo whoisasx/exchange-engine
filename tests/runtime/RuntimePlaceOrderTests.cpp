@@ -207,6 +207,17 @@ void assert_mark_price_fixture_state(const MarkPriceState& state) {
   assert(state.source_status == "VALID");
 }
 
+void assert_funding_rate_fixture_state(const FundingRateState& state) {
+  assert(state.market_id == 1);
+  assert(state.funding_interval_id ==
+         "funding_SOL-PERP_1710000000_1710028800");
+  assert(state.rate == 25);
+  assert(state.rate_scale == 1'000'000);
+  assert(state.interval_start_ms == 1'710'000'000'000LL);
+  assert(state.interval_end_ms == 1'710'028'800'000LL);
+  assert(state.source_timestamp_ms == 1'710'000'001'000LL);
+}
+
 std::string place_order_json(const std::string& input_id,
                              const std::string& request_id,
                              const std::string& idempotency_key,
@@ -346,6 +357,71 @@ void test_parses_mark_price_updated_fixture() {
   assert(input.valid_until_ms == 1'710'000'005'100LL);
   assert(input.source_sequence == 45'001);
   assert(input.source_status == "VALID");
+}
+
+void test_parses_funding_rate_updated_fixture() {
+  const auto raw = read_file(
+      std::filesystem::path(PROTOCOL_EXAMPLES_DIR) /
+      "engine-funding-rate-updated.input.json");
+
+  EngineInputParser parser;
+  const auto parsed = parser.parse(raw);
+  assert(parsed.kind == ParsedEngineInputKind::FundingRateUpdated);
+
+  const auto& input =
+      std::get<cex::adapter::FundingRateUpdatedInput>(parsed.value);
+  assert(input.input_id == "input_funding_rate_001");
+  assert(input.market_id == 1);
+  assert(input.funding_interval_id ==
+         "funding_SOL-PERP_1710000000_1710028800");
+  assert(input.rate == 25);
+  assert(input.rate_scale == 1'000'000);
+  assert(input.interval_start_ms == 1'710'000'000'000LL);
+  assert(input.interval_end_ms == 1'710'028'800'000LL);
+  assert(input.source_timestamp_ms == 1'710'000'001'000LL);
+}
+
+void test_funding_rate_updated_validation() {
+  EngineInputParser parser;
+
+  try {
+    (void)parser.parse(R"json({
+  "type": "FundingRateUpdated",
+  "payload": {
+    "input_id": "input_funding_rate_bad_scale",
+    "market_id": 1,
+    "funding_interval_id": "funding_bad",
+    "rate": 25,
+    "rate_scale": 0,
+    "interval_start_ms": 1710000000000,
+    "interval_end_ms": 1710028800000,
+    "source_timestamp_ms": 1710000001000
+  }
+})json");
+    assert(false);
+  } catch (const EngineInputParserError& error) {
+    assert(std::string(error.what()).find("rate_scale") != std::string::npos);
+  }
+
+  try {
+    (void)parser.parse(R"json({
+  "type": "FundingRateUpdated",
+  "payload": {
+    "input_id": "input_funding_rate_bad_interval",
+    "market_id": 1,
+    "funding_interval_id": "funding_bad",
+    "rate": 25,
+    "rate_scale": 1000000,
+    "interval_start_ms": 1710028800000,
+    "interval_end_ms": 1710028800000,
+    "source_timestamp_ms": 1710000001000
+  }
+})json");
+    assert(false);
+  } catch (const EngineInputParserError& error) {
+    assert(std::string(error.what()).find("interval_end_ms") !=
+           std::string::npos);
+  }
 }
 
 void test_runtime_resting_limit_order() {
@@ -546,6 +622,79 @@ void test_runtime_mark_price_updated_emits_event_without_reply() {
   assert(runtime.market_sequences().peek(1) == 2);
 }
 
+void test_runtime_funding_rate_updated_emits_event_without_reply() {
+  auto runtime = make_runtime();
+  const auto raw = read_file(
+      std::filesystem::path(PROTOCOL_EXAMPLES_DIR) /
+      "engine-funding-rate-updated.input.json");
+
+  const auto result = runtime.process(make_record(raw, 1621));
+  assert(result.status == EngineProcessStatus::Processed);
+  assert(result.duplicate == std::nullopt);
+  assert(result.replies.empty());
+  assert(result.events.size() == 1);
+
+  const auto& event = result.events[0];
+  assert(event.topic == EngineEventsTopic);
+  assert(event.type == "FundingRateUpdated");
+  assert(event.key == "1");
+  assert(event.partition == std::nullopt);
+  assert(event.payload.at("engine_event_id") == "eng_1_1");
+  assert(event.payload.at("engine_sequence") == "1");
+  assert(event.payload.at("engine_timestamp_ms") == "1710000000000");
+  assert(event.payload.at("source_input_id") == "input_funding_rate_001");
+  assert(event.payload.at("source_input_offset") == "1621");
+  assert(event.payload.at("market_id") == "1");
+  assert(event.payload.at("funding_interval_id") ==
+         "funding_SOL-PERP_1710000000_1710028800");
+  assert(event.payload.at("rate") == "25");
+  assert(event.payload.at("rate_scale") == "1000000");
+  assert(event.payload.at("interval_start_ms") == "1710000000000");
+  assert(event.payload.at("interval_end_ms") == "1710028800000");
+
+  const auto message = parse_serialized_output(event);
+  assert_payload_number(message, "engine_sequence", "1");
+  assert_payload_number(message, "engine_timestamp_ms", "1710000000000");
+  assert_payload_number(message, "source_input_offset", "1621");
+  assert_payload_number(message, "market_id", "1");
+  assert_payload_string(message,
+                        "funding_interval_id",
+                        "funding_SOL-PERP_1710000000_1710028800");
+  assert_payload_number(message, "rate", "25");
+  assert_payload_number(message, "rate_scale", "1000000");
+  assert_payload_number(message, "interval_start_ms", "1710000000000");
+  assert_payload_number(message, "interval_end_ms", "1710028800000");
+
+  const auto funding = runtime.funding_rates().find(1);
+  assert(funding != runtime.funding_rates().end());
+  assert_funding_rate_fixture_state(funding->second);
+  assert(runtime.market_sequences().peek(1) == 2);
+
+  const auto snapshot = runtime.snapshot_state();
+  assert(snapshot.public_sequences.at(1) == 2);
+  assert(snapshot.funding_rates.contains(1));
+  assert_funding_rate_fixture_state(snapshot.funding_rates.at(1));
+  assert(snapshot.processed_input_ids.contains("input_funding_rate_001"));
+  assert(snapshot.processed_input_ids.at("input_funding_rate_001")
+             .command_kind == RuntimeCommandKind::FundingRateUpdated);
+  assert(snapshot.processed_input_ids.at("input_funding_rate_001")
+             .idempotency_key.empty());
+  assert(snapshot.processed_idempotency_keys.empty());
+
+  auto restored = make_runtime();
+  restored.restore_state(snapshot);
+  assert(restored.market_sequences().peek(1) == 2);
+  assert_funding_rate_fixture_state(restored.funding_rates().at(1));
+
+  const auto duplicate = restored.process(make_record(raw, 1622));
+  assert_duplicate_result(duplicate,
+                          EngineDuplicateReason::InputId,
+                          "input_funding_rate_001",
+                          1621,
+                          "input_funding_rate_001");
+  assert(restored.market_sequences().peek(1) == 2);
+}
+
 void test_replay_silent_resting_order_updates_state_without_outputs() {
   auto runtime = make_runtime();
   const auto raw = read_file(
@@ -630,6 +779,42 @@ void test_replay_silent_mark_price_updates_state_without_outputs() {
                           "input_mark_001");
   assert(restored.market_sequences().peek(1) == 2);
   assert_mark_price_fixture_state(restored.mark_prices().at(1));
+}
+
+void test_replay_silent_funding_rate_updates_state_without_outputs() {
+  auto runtime = make_runtime();
+  const auto raw = read_file(
+      std::filesystem::path(PROTOCOL_EXAMPLES_DIR) /
+      "engine-funding-rate-updated.input.json");
+
+  const auto result = runtime.process_replay(make_record(raw, 1631));
+  assert(result.status == EngineProcessStatus::Processed);
+  assert(result.duplicate == std::nullopt);
+  assert(result.empty());
+  const auto funding = runtime.funding_rates().find(1);
+  assert(funding != runtime.funding_rates().end());
+  assert_funding_rate_fixture_state(funding->second);
+  assert(runtime.market_sequences().peek(1) == 2);
+
+  const auto snapshot = runtime.snapshot_state();
+  assert(snapshot.public_sequences.at(1) == 2);
+  assert(snapshot.funding_rates.contains(1));
+  assert_funding_rate_fixture_state(snapshot.funding_rates.at(1));
+  assert(snapshot.processed_input_ids.contains("input_funding_rate_001"));
+  assert(snapshot.processed_input_ids.at("input_funding_rate_001")
+             .command_kind == RuntimeCommandKind::FundingRateUpdated);
+  assert(snapshot.processed_idempotency_keys.empty());
+
+  auto restored = make_runtime();
+  restored.restore_state(snapshot);
+  const auto duplicate = restored.process_replay(make_record(raw, 1632));
+  assert_duplicate_result(duplicate,
+                          EngineDuplicateReason::InputId,
+                          "input_funding_rate_001",
+                          1631,
+                          "input_funding_rate_001");
+  assert(restored.market_sequences().peek(1) == 2);
+  assert_funding_rate_fixture_state(restored.funding_rates().at(1));
 }
 
 void test_live_sequence_continues_after_replayed_events() {
@@ -891,13 +1076,17 @@ int main() {
   try {
     test_parses_place_order_fixture();
     test_parses_mark_price_updated_fixture();
+    test_parses_funding_rate_updated_fixture();
+    test_funding_rate_updated_validation();
     test_runtime_resting_limit_order();
     test_runtime_crossing_order_emits_trade();
     test_runtime_cancel_order();
     test_runtime_mark_price_updated_emits_event_without_reply();
+    test_runtime_funding_rate_updated_emits_event_without_reply();
     test_replay_silent_resting_order_updates_state_without_outputs();
     test_replay_silent_crossing_order_updates_state_without_outputs();
     test_replay_silent_mark_price_updates_state_without_outputs();
+    test_replay_silent_funding_rate_updates_state_without_outputs();
     test_live_sequence_continues_after_replayed_events();
     test_place_order_duplicate_input_id_is_silent();
     test_place_order_duplicate_idempotency_is_silent();

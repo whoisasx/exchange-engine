@@ -258,6 +258,27 @@ std::string mark_price_json(const std::string& input_id,
 })json";
 }
 
+std::string funding_rate_json(const std::string& input_id,
+                              std::int64_t rate = 25,
+                              std::int64_t rate_scale = 1'000'000) {
+  return R"json({
+  "type": "FundingRateUpdated",
+  "payload": {
+    "input_id": ")json" +
+         input_id + R"json(",
+    "market_id": 1,
+    "funding_interval_id": "funding_SOL-PERP_1710000000_1710028800",
+    "rate": )json" +
+         std::to_string(rate) + R"json(,
+    "rate_scale": )json" +
+         std::to_string(rate_scale) + R"json(,
+    "interval_start_ms": 1710000000000,
+    "interval_end_ms": 1710028800000,
+    "source_timestamp_ms": 1710000001000
+  }
+})json";
+}
+
 EngineCheckpoint make_checkpoint(std::int64_t next_offset,
                                  std::string checkpoint_id =
                                      "checkpoint-1") {
@@ -409,6 +430,23 @@ void assert_mark_processed_snapshot_entry(
   assert(!snapshot.processed_idempotency_keys.contains(""));
 }
 
+void assert_funding_processed_snapshot_entry(
+    const cex::runtime::EngineRuntimeStateSnapshot& snapshot,
+    const std::string& input_id,
+    std::int64_t offset) {
+  const auto input = snapshot.processed_input_ids.find(input_id);
+  assert(input != snapshot.processed_input_ids.end());
+  assert(input->second.command_kind ==
+         cex::runtime::RuntimeCommandKind::FundingRateUpdated);
+  assert(input->second.topic == EngineInputTopic);
+  assert(input->second.partition == 0);
+  assert(input->second.offset == offset);
+  assert(input->second.input_id.has_value());
+  assert(*input->second.input_id == input_id);
+  assert(input->second.idempotency_key.empty());
+  assert(!snapshot.processed_idempotency_keys.contains(""));
+}
+
 void assert_mark_price_state(const cex::runtime::MarkPriceState& state,
                              std::int64_t mark_price,
                              std::int64_t index_price,
@@ -421,6 +459,20 @@ void assert_mark_price_state(const cex::runtime::MarkPriceState& state,
   assert(state.valid_until_ms == 1'710'000'005'100LL);
   assert(state.source_sequence == source_sequence);
   assert(state.source_status == "VALID");
+}
+
+void assert_funding_rate_state(
+    const cex::runtime::FundingRateState& state,
+    std::int64_t rate,
+    std::int64_t rate_scale) {
+  assert(state.market_id == 1);
+  assert(state.funding_interval_id ==
+         "funding_SOL-PERP_1710000000_1710028800");
+  assert(state.rate == rate);
+  assert(state.rate_scale == rate_scale);
+  assert(state.interval_start_ms == 1'710'000'000'000LL);
+  assert(state.interval_end_ms == 1'710'028'800'000LL);
+  assert(state.source_timestamp_ms == 1'710'000'001'000LL);
 }
 
 void test_no_checkpoint_reports_no_recovery_needed() {
@@ -545,7 +597,7 @@ void test_replay_silent_poll_updates_state_without_outputs() {
 void test_replay_recovery_matches_uninterrupted_runtime() {
   constexpr std::int64_t pre_checkpoint_offset = 1200;
   constexpr std::int64_t checkpoint_next_offset = 1201;
-  constexpr std::int64_t post_checkpoint_end_offset = 1206;
+  constexpr std::int64_t post_checkpoint_end_offset = 1207;
 
   const auto pre_checkpoint_order =
       place_order_json("input_recovery_pre_001",
@@ -579,6 +631,8 @@ void test_replay_recovery_matches_uninterrupted_runtime() {
                         44);
   const auto mark_update =
       mark_price_json("input_recovery_mark_001", 101, 100, 45'002);
+  const auto funding_update =
+      funding_rate_json("input_recovery_funding_001", 27, 1'000'000);
 
   auto runtime_a = make_runtime();
   const auto pre_checkpoint_result = runtime_a.process(
@@ -617,8 +671,18 @@ void test_replay_recovery_matches_uninterrupted_runtime() {
   assert(live_mark.events[0].payload.at("engine_sequence") == "5");
   assert_mark_price_state(runtime_a.mark_prices().at(1), 101, 100, 45'002);
 
+  const auto live_funding =
+      runtime_a.process(make_runtime_record(funding_update, 1203));
+  assert(live_funding.status ==
+         cex::runtime::EngineProcessStatus::Processed);
+  assert(live_funding.replies.empty());
+  assert(live_funding.events.size() == 1);
+  assert(live_funding.events[0].type == "FundingRateUpdated");
+  assert(live_funding.events[0].payload.at("engine_sequence") == "6");
+  assert_funding_rate_state(runtime_a.funding_rates().at(1), 27, 1'000'000);
+
   const auto live_post_resting =
-      runtime_a.process(make_runtime_record(post_resting_order, 1203));
+      runtime_a.process(make_runtime_record(post_resting_order, 1204));
   assert(live_post_resting.status ==
          cex::runtime::EngineProcessStatus::Processed);
   assert(live_post_resting.replies.size() == 1);
@@ -626,7 +690,7 @@ void test_replay_recovery_matches_uninterrupted_runtime() {
   assert_book_has_order(runtime_a, 9201);
 
   const auto live_cancel =
-      runtime_a.process(make_runtime_record(cancel_order, 1204));
+      runtime_a.process(make_runtime_record(cancel_order, 1205));
   assert(live_cancel.status == cex::runtime::EngineProcessStatus::Processed);
   assert(live_cancel.replies.size() == 1);
   assert(live_cancel.events.size() == 2);
@@ -634,19 +698,20 @@ void test_replay_recovery_matches_uninterrupted_runtime() {
   assert(runtime_a.metadata_store().empty());
 
   const auto live_duplicate =
-      runtime_a.process(make_runtime_record(cancel_order, 1205));
+      runtime_a.process(make_runtime_record(cancel_order, 1206));
   assert_duplicate_result(live_duplicate,
                           cex::runtime::EngineDuplicateReason::InputId,
                           "input_recovery_cancel_001",
-                          1204,
+                          1205,
                           "input_recovery_cancel_001");
 
   std::vector<ConsumedRecord> post_checkpoint_records{
       make_consumed_record(crossing_order, 1201),
       make_consumed_record(mark_update, 1202),
-      make_consumed_record(post_resting_order, 1203),
-      make_consumed_record(cancel_order, 1204),
+      make_consumed_record(funding_update, 1203),
+      make_consumed_record(post_resting_order, 1204),
       make_consumed_record(cancel_order, 1205),
+      make_consumed_record(cancel_order, 1206),
   };
   FakeConsumer consumer(post_checkpoint_records);
   consumer.watermark = BrokerWatermarkOffsets{
@@ -670,7 +735,7 @@ void test_replay_recovery_matches_uninterrupted_runtime() {
   assert(recovery.replayed_records ==
          static_cast<std::int64_t>(post_checkpoint_records.size()));
   assert(recovery.replay_output_records == 0);
-  assert(recovery.last_replayed_offset == 1205);
+  assert(recovery.last_replayed_offset == 1206);
   assert(recovery.next_offset == post_checkpoint_end_offset);
   assert(consumer.watermark_calls == 1);
   assert(consumer.seeks.size() == 1);
@@ -690,8 +755,9 @@ void test_replay_recovery_matches_uninterrupted_runtime() {
   assert_book_does_not_have_order(runtime_b, 9201);
   assert(runtime_a.market_sequences().peek(1) ==
          runtime_b.market_sequences().peek(1));
-  assert(runtime_a.market_sequences().peek(1) == 10);
+  assert(runtime_a.market_sequences().peek(1) == 11);
   assert_mark_price_state(runtime_b.mark_prices().at(1), 101, 100, 45'002);
+  assert_funding_rate_state(runtime_b.funding_rates().at(1), 27, 1'000'000);
 
   const auto live_snapshot = runtime_a.snapshot_state();
   const auto replayed_snapshot = runtime_b.snapshot_state();
@@ -711,7 +777,12 @@ void test_replay_recovery_matches_uninterrupted_runtime() {
   assert(live_snapshot.mark_prices.size() == 1);
   assert_mark_price_state(live_snapshot.mark_prices.at(1), 101, 100, 45'002);
   assert_mark_price_state(replayed_snapshot.mark_prices.at(1), 101, 100, 45'002);
-  assert(live_snapshot.processed_input_ids.size() == 5);
+  assert(live_snapshot.funding_rates.size() ==
+         replayed_snapshot.funding_rates.size());
+  assert(live_snapshot.funding_rates.size() == 1);
+  assert_funding_rate_state(live_snapshot.funding_rates.at(1), 27, 1'000'000);
+  assert_funding_rate_state(replayed_snapshot.funding_rates.at(1), 27, 1'000'000);
+  assert(live_snapshot.processed_input_ids.size() == 6);
   assert(live_snapshot.processed_idempotency_keys.size() == 4);
 
   assert_processed_snapshot_entry(live_snapshot,
@@ -733,35 +804,41 @@ void test_replay_recovery_matches_uninterrupted_runtime() {
   assert_processed_snapshot_entry(live_snapshot,
                                   "input_recovery_rest_001",
                                   "idem-recovery-rest-001",
-                                  1203);
+                                  1204);
   assert_processed_snapshot_entry(replayed_snapshot,
                                   "input_recovery_rest_001",
                                   "idem-recovery-rest-001",
-                                  1203);
+                                  1204);
   assert_processed_snapshot_entry(live_snapshot,
                                   "input_recovery_cancel_001",
                                   "idem-recovery-cancel-001",
-                                  1204);
+                                  1205);
   assert_processed_snapshot_entry(replayed_snapshot,
                                   "input_recovery_cancel_001",
                                   "idem-recovery-cancel-001",
-                                  1204);
+                                  1205);
   assert_mark_processed_snapshot_entry(live_snapshot,
                                        "input_recovery_mark_001",
                                        1202);
   assert_mark_processed_snapshot_entry(replayed_snapshot,
                                        "input_recovery_mark_001",
                                        1202);
+  assert_funding_processed_snapshot_entry(live_snapshot,
+                                          "input_recovery_funding_001",
+                                          1203);
+  assert_funding_processed_snapshot_entry(replayed_snapshot,
+                                          "input_recovery_funding_001",
+                                          1203);
 
   const auto duplicate_a =
-      runtime_a.process(make_runtime_record(cancel_order, 1206));
+      runtime_a.process(make_runtime_record(cancel_order, 1207));
   const auto duplicate_b =
-      runtime_b.process(make_runtime_record(cancel_order, 1206));
+      runtime_b.process(make_runtime_record(cancel_order, 1207));
   assert_process_results_equivalent(duplicate_a, duplicate_b);
   assert_duplicate_result(duplicate_a,
                           cex::runtime::EngineDuplicateReason::InputId,
                           "input_recovery_cancel_001",
-                          1204,
+                          1205,
                           "input_recovery_cancel_001");
 
   const auto next_live_order =
@@ -775,17 +852,17 @@ void test_replay_recovery_matches_uninterrupted_runtime() {
                        3,
                        101);
   const auto next_live_a =
-      runtime_a.process(make_runtime_record(next_live_order, 1207));
+      runtime_a.process(make_runtime_record(next_live_order, 1208));
   const auto next_live_b =
-      runtime_b.process(make_runtime_record(next_live_order, 1207));
+      runtime_b.process(make_runtime_record(next_live_order, 1208));
   assert_process_results_equivalent(next_live_a, next_live_b);
   assert(next_live_a.status == cex::runtime::EngineProcessStatus::Processed);
   assert(next_live_a.replies.size() == 1);
   assert(next_live_a.events.size() == 2);
   assert(next_live_a.events[0].type == "OrderOpened");
-  assert(next_live_a.events[0].payload.at("engine_sequence") == "10");
+  assert(next_live_a.events[0].payload.at("engine_sequence") == "11");
   assert(next_live_a.events[1].type == "OrderBookDelta");
-  assert(next_live_a.events[1].payload.at("engine_sequence") == "11");
+  assert(next_live_a.events[1].payload.at("engine_sequence") == "12");
   assert_book_has_order(runtime_a, 9301);
   assert_book_has_order(runtime_b, 9301);
 }
