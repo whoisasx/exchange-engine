@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -13,6 +14,8 @@
 
 namespace cex::runtime {
 namespace {
+
+constexpr std::int64_t kMaxAutomaticLiquidationAttemptsPerTrigger = 16;
 
 [[nodiscard]] std::int64_t system_timestamp_ms() {
   const auto now = std::chrono::system_clock::now().time_since_epoch();
@@ -282,6 +285,43 @@ template <typename Value>
          best_bid->price.ticks() >= price;
 }
 
+[[nodiscard]] std::int64_t maintenance_margin_for(
+    std::int64_t signed_quantity,
+    cex::adapter::AdapterPrice price) {
+  return (abs_quantity(signed_quantity) * price) / 20;
+}
+
+[[nodiscard]] std::int64_t margin_ratio_for(std::int64_t equity,
+                                            std::int64_t maintenance_margin) {
+  if (maintenance_margin == 0) {
+    return 0;
+  }
+  return (equity * 10'000) / maintenance_margin;
+}
+
+[[nodiscard]] std::int64_t notional_for(std::int64_t signed_quantity,
+                                        cex::adapter::AdapterPrice price) {
+  return abs_quantity(signed_quantity) * price;
+}
+
+[[nodiscard]] std::string risk_status_for(std::int64_t signed_quantity,
+                                          std::int64_t equity,
+                                          std::int64_t maintenance_margin) {
+  if (signed_quantity == 0) {
+    return "FLAT";
+  }
+  if (equity <= maintenance_margin) {
+    return "LIQUIDATABLE";
+  }
+  return "HEALTHY";
+}
+
+[[nodiscard]] cex::adapter::AdapterSide position_adapter_side(
+    std::int64_t signed_quantity) {
+  return signed_quantity >= 0 ? cex::adapter::AdapterSide::Long
+                              : cex::adapter::AdapterSide::Short;
+}
+
 struct AdlCandidate {
   PositionRiskKey key;
   IsolatedPositionState position;
@@ -289,6 +329,13 @@ struct AdlCandidate {
   std::int64_t unrealized_pnl{0};
   std::int32_t leverage{0};
   std::int64_t margin_ratio{0};
+};
+
+struct AutomaticLiquidationCandidate {
+  PositionRiskKey key;
+  IsolatedPositionState position;
+  IsolatedRiskState risk;
+  std::int64_t notional{0};
 };
 
 [[nodiscard]] bool has_opposing_exposure(std::int64_t liquidated_quantity,
@@ -364,24 +411,97 @@ struct AdlCandidate {
   return available;
 }
 
+[[nodiscard]] std::vector<AutomaticLiquidationCandidate>
+automatic_liquidation_candidates_for(
+    cex::adapter::MarketId market_id,
+    const IsolatedPositionMap& positions,
+    const IsolatedRiskMap& risk_states,
+    const std::set<PositionRiskKey>& attempted) {
+  std::vector<AutomaticLiquidationCandidate> candidates;
+  for (const auto& [key, risk] : risk_states) {
+    if (key.market_id != market_id || risk.status != "LIQUIDATABLE" ||
+        risk.signed_quantity == 0 || attempted.contains(key)) {
+      continue;
+    }
+
+    const auto position = positions.find(key);
+    if (position == positions.end() ||
+        position->second.signed_quantity == 0) {
+      continue;
+    }
+
+    const auto price = risk.mark_price > 0 ? risk.mark_price
+                                           : position->second.average_entry_price;
+    candidates.push_back(AutomaticLiquidationCandidate{
+        .key = key,
+        .position = position->second,
+        .risk = risk,
+        .notional = notional_for(position->second.signed_quantity, price),
+    });
+  }
+
+  std::sort(candidates.begin(),
+            candidates.end(),
+            [](const AutomaticLiquidationCandidate& left,
+               const AutomaticLiquidationCandidate& right) {
+              if (left.risk.margin_ratio != right.risk.margin_ratio) {
+                return left.risk.margin_ratio < right.risk.margin_ratio;
+              }
+              if (left.risk.equity != right.risk.equity) {
+                return left.risk.equity < right.risk.equity;
+              }
+              if (left.notional != right.notional) {
+                return left.notional > right.notional;
+              }
+              return left.key.user_id < right.key.user_id;
+            });
+  return candidates;
+}
+
 [[nodiscard]] std::string position_id_text(
     cex::adapter::AdapterUserId user_id,
     cex::adapter::MarketId market_id) {
   return "pos_" + text(user_id) + "_" + text(market_id);
 }
 
-[[nodiscard]] std::int64_t maintenance_margin_for(
-    std::int64_t signed_quantity,
-    cex::adapter::AdapterPrice price) {
-  return (abs_quantity(signed_quantity) * price) / 20;
-}
+[[nodiscard]] IsolatedRiskState risk_from_position(
+    const IsolatedPositionState& position,
+    cex::adapter::AdapterPrice mark_price,
+    std::int64_t updated_at_ms,
+    const IsolatedRiskState* previous_risk = nullptr) {
+  const auto unrealized_pnl =
+      (mark_price - position.average_entry_price) * position.signed_quantity;
+  const auto maintenance_margin =
+      maintenance_margin_for(position.signed_quantity, mark_price);
 
-[[nodiscard]] std::int64_t margin_ratio_for(std::int64_t equity,
-                                            std::int64_t maintenance_margin) {
-  if (maintenance_margin == 0) {
-    return 0;
+  std::int64_t equity_adjustment = 0;
+  if (previous_risk != nullptr) {
+    equity_adjustment = previous_risk->equity -
+                        (previous_risk->isolated_margin +
+                         previous_risk->unrealized_pnl);
   }
-  return (equity * 10'000) / maintenance_margin;
+
+  const auto equity =
+      position.isolated_margin + unrealized_pnl + equity_adjustment;
+  return IsolatedRiskState{
+      .user_id = position.user_id,
+      .market_id = position.market_id,
+      .status = risk_status_for(position.signed_quantity,
+                                equity,
+                                maintenance_margin),
+      .margin_asset = position.margin_asset.empty() ? "USDC"
+                                                    : position.margin_asset,
+      .signed_quantity = position.signed_quantity,
+      .average_entry_price = position.average_entry_price,
+      .mark_price = mark_price,
+      .isolated_margin = position.isolated_margin,
+      .unrealized_pnl = unrealized_pnl,
+      .equity = equity,
+      .maintenance_margin = maintenance_margin,
+      .margin_ratio = margin_ratio_for(equity, maintenance_margin),
+      .leverage = position.leverage,
+      .updated_at_ms = updated_at_ms,
+  };
 }
 
 void add_runtime_source_fields(PayloadFields& payload,
@@ -647,6 +767,49 @@ void add_runtime_engine_fields(
       .reserved_margin_amount = 0,
       .leverage = position.leverage,
       .source = input.source,
+  };
+}
+
+[[nodiscard]] std::string automatic_liquidation_id(
+    const InboundEngineRecord& source,
+    const std::optional<std::string>& source_input_id,
+    const PositionRiskKey& key,
+    std::int64_t attempt) {
+  std::string id = "auto-liq-" + text(key.market_id) + "-" +
+                   text(key.user_id) + "-" + text(source.partition) + "-" +
+                   text(source.offset) + "-" + text(attempt);
+  if (source_input_id.has_value()) {
+    id += "-" + *source_input_id;
+  }
+  return id;
+}
+
+[[nodiscard]] cex::adapter::LiquidatePositionInput
+automatic_liquidation_input(
+    const InboundEngineRecord& source,
+    const std::optional<std::string>& source_input_id,
+    const AutomaticLiquidationCandidate& candidate,
+    std::int64_t attempt) {
+  const auto liquidation_id =
+      automatic_liquidation_id(source, source_input_id, candidate.key, attempt);
+  return cex::adapter::LiquidatePositionInput{
+      .input_id = source_input_id,
+      .envelope = cex::adapter::CommandEnvelope{
+          .request_id = "auto-req-" + liquidation_id,
+          .idempotency_key = "auto-idem-" + liquidation_id,
+          .user_id = 0,
+          .reply_partition = 0,
+      },
+      .liquidation_id = liquidation_id,
+      .market_id = candidate.key.market_id,
+      .market_name = "",
+      .liquidated_user_id = candidate.key.user_id,
+      .position_side =
+          position_adapter_side(candidate.position.signed_quantity),
+      .quantity = abs_quantity(candidate.position.signed_quantity),
+      .price = 0,
+      .request_source = std::string{"ENGINE_AUTO"},
+      .source = broker_context(source),
   };
 }
 
@@ -969,6 +1132,268 @@ void EngineRuntime::mark_input_processed(
   (void)processed_input_ids_.emplace(*input_id, std::move(processed));
 }
 
+EngineProcessResult EngineRuntime::execute_liquidation(
+    const InboundEngineRecord& record,
+    const cex::adapter::LiquidatePositionInput& input,
+    bool emit_replies) {
+  EngineProcessResult result;
+  const auto rejection_reason =
+      liquidation_rejection_reason(input, positions_, risk_states_);
+  if (!rejection_reason.empty()) {
+    if (emit_replies) {
+      result.replies.push_back(
+          make_liquidation_rejected_reply(record, input, rejection_reason));
+    }
+    return result;
+  }
+
+  const PositionRiskKey key{
+      .user_id = input.liquidated_user_id,
+      .market_id = input.market_id,
+  };
+  const auto previous_position = positions_.at(key);
+  const auto previous_risk = risk_states_.at(key);
+  const auto order_quantity = liquidation_quantity(input, previous_position);
+  const auto order_price =
+      liquidation_price(input, previous_position, mark_prices_);
+  const auto order_side =
+      liquidation_order_side(previous_position.signed_quantity);
+  const bool has_crossing_liquidity =
+      crossing_liquidity_exists(core_,
+                                input.market_id,
+                                order_side,
+                                order_price);
+  const auto initial_adl_candidates =
+      adl_candidates_for(input, previous_position, positions_, risk_states_);
+  const auto initial_adl_available =
+      total_adl_available(initial_adl_candidates, order_quantity);
+  if (order_quantity <= 0 || order_price <= 0 ||
+      (!has_crossing_liquidity && initial_adl_available <= 0)) {
+    if (emit_replies) {
+      result.replies.push_back(make_liquidation_rejected_reply(
+          record, input, "no liquidation liquidity"));
+    }
+    return result;
+  }
+
+  auto synthetic =
+      synthetic_liquidation_order(input,
+                                  previous_position,
+                                  order_quantity,
+                                  order_price);
+  auto mapped =
+      cex::adapter::map_place_order_to_core(synthetic, received_sequence(record));
+  if (!mapped.metadata_to_record.has_value()) {
+    throw std::runtime_error(
+        "liquidation order mapping did not produce metadata");
+  }
+
+  EngineEventTranslationContext context{
+      .command_kind = RuntimeCommandKind::LiquidatePosition,
+      .source = record,
+      .request_id = input.envelope.request_id,
+      .input_id = input.input_id,
+      .reply_partition = input.envelope.reply_partition,
+      .order_id = synthetic.order_id,
+      .market_id = input.market_id,
+      .can_open_resting_order = false,
+      .pending_metadata = *mapped.metadata_to_record,
+      .liquidation_id = input.liquidation_id,
+      .liquidated_user_id = input.liquidated_user_id,
+      .liquidation_position_side = input.position_side,
+  };
+
+  std::vector<EngineEvent> core_events;
+  if (has_crossing_liquidity) {
+    core_events = core_.process(mapped.command);
+  }
+  const bool has_core_trade = has_trade_executed(core_events);
+  if (has_crossing_liquidity && !has_core_trade &&
+      initial_adl_available <= 0) {
+    if (emit_replies) {
+      result.replies.push_back(make_liquidation_rejected_reply(
+          record, input, "no liquidation liquidity"));
+    }
+    return result;
+  }
+
+  result.events.push_back(make_liquidation_started_event(record,
+                                                         input,
+                                                         previous_position,
+                                                         previous_risk,
+                                                         market_sequences_,
+                                                         clock_));
+  if (has_crossing_liquidity) {
+    auto translated = translator_.translate(core_events,
+                                            context,
+                                            metadata_store_,
+                                            positions_,
+                                            risk_states_,
+                                            mark_prices_,
+                                            market_sequences_,
+                                            clock_);
+    append_process_result(result, translated);
+    cleanup_completed_order_metadata(metadata_store_, core_events);
+  } else if (emit_replies) {
+    result.replies.push_back(make_liquidation_accepted_reply(
+        record, input, *mapped.metadata_to_record));
+  }
+
+  const auto remaining_position = positions_.find(key);
+  const auto pending_remaining =
+      context.pending_metadata.has_value()
+          ? context.pending_metadata->remaining_quantity
+          : std::int64_t{0};
+  const auto remaining_adl_quantity =
+      remaining_position == positions_.end()
+          ? 0
+          : std::min(pending_remaining,
+                     abs_quantity(remaining_position->second.signed_quantity));
+  if (remaining_adl_quantity > 0) {
+    (void)append_adl_fills(result,
+                           input,
+                           context,
+                           remaining_adl_quantity,
+                           order_price,
+                           translator_,
+                           metadata_store_,
+                           positions_,
+                           risk_states_,
+                           mark_prices_,
+                           market_sequences_,
+                           clock_);
+  }
+
+  const auto final_position = positions_.find(key);
+  const auto remaining_quantity =
+      final_position == positions_.end()
+          ? 0
+          : abs_quantity(final_position->second.signed_quantity);
+  result.events.push_back(make_liquidation_completed_event(record,
+                                                           input,
+                                                           remaining_quantity,
+                                                           market_sequences_,
+                                                           clock_));
+
+  if (!emit_replies) {
+    result.replies.clear();
+  }
+  return result;
+}
+
+EngineProcessResult EngineRuntime::evaluate_automatic_liquidations_for_market(
+    cex::adapter::MarketId market_id,
+    const InboundEngineRecord& source,
+    const std::optional<std::string>& source_input_id) {
+  EngineProcessResult result;
+  std::set<PositionRiskKey> attempted;
+  std::int64_t attempts = 0;
+
+  while (attempts < kMaxAutomaticLiquidationAttemptsPerTrigger) {
+    const auto candidates = automatic_liquidation_candidates_for(
+        market_id, positions_, risk_states_, attempted);
+    if (candidates.empty()) {
+      break;
+    }
+
+    bool should_rescan = false;
+    for (const auto& candidate : candidates) {
+      if (attempts >= kMaxAutomaticLiquidationAttemptsPerTrigger) {
+        break;
+      }
+
+      attempted.insert(candidate.key);
+      ++attempts;
+      auto input = automatic_liquidation_input(source,
+                                               source_input_id,
+                                               candidate,
+                                               attempts);
+      auto execution = execute_liquidation(source, input, false);
+      const bool made_progress = !execution.events.empty();
+      append_process_result(result, execution);
+      if (made_progress) {
+        should_rescan = true;
+        break;
+      }
+    }
+
+    if (!should_rescan) {
+      break;
+    }
+  }
+
+  return result;
+}
+
+EngineProcessResult EngineRuntime::evaluate_all_automatic_liquidations(
+    const InboundEngineRecord& source,
+    const std::optional<std::string>& source_input_id) {
+  EngineProcessResult result;
+  std::set<cex::adapter::MarketId> markets;
+  for (const auto& [key, risk] : risk_states_) {
+    if (risk.status == "LIQUIDATABLE" && risk.signed_quantity != 0) {
+      markets.insert(key.market_id);
+    }
+  }
+
+  for (const auto market_id : markets) {
+    auto market_result = evaluate_automatic_liquidations_for_market(
+        market_id, source, source_input_id);
+    append_process_result(result, market_result);
+  }
+  return result;
+}
+
+EngineProcessResult EngineRuntime::evaluate_automatic_liquidations_for_market(
+    cex::adapter::MarketId market_id,
+    const InboundEngineRecord& source,
+    ProcessingMode mode) {
+  auto result = evaluate_automatic_liquidations_for_market(
+      market_id, source, std::optional<std::string>{});
+  return apply_processing_mode(std::move(result), mode);
+}
+
+EngineProcessResult EngineRuntime::evaluate_all_automatic_liquidations(
+    const InboundEngineRecord& source,
+    ProcessingMode mode) {
+  auto result =
+      evaluate_all_automatic_liquidations(source, std::optional<std::string>{});
+  return apply_processing_mode(std::move(result), mode);
+}
+
+void EngineRuntime::append_mark_price_risk_updates(
+    EngineProcessResult& result,
+    const InboundEngineRecord& record,
+    const std::optional<std::string>& input_id,
+    cex::adapter::MarketId market_id,
+    cex::adapter::AdapterPrice mark_price,
+    std::int64_t updated_at_ms) {
+  std::vector<PositionRiskKey> updated_keys;
+  for (const auto& [key, position] : positions_) {
+    if (position.market_id != market_id || position.signed_quantity == 0) {
+      continue;
+    }
+
+    const auto previous_risk = risk_states_.find(key);
+    const auto risk = risk_from_position(
+        position,
+        mark_price,
+        updated_at_ms,
+        previous_risk == risk_states_.end() ? nullptr : &previous_risk->second);
+    risk_states_[key] = risk;
+    updated_keys.push_back(key);
+  }
+
+  for (const auto& key : updated_keys) {
+    result.events.push_back(make_runtime_risk_state_updated_event(
+        record,
+        input_id,
+        risk_states_.at(key),
+        market_sequences_,
+        clock_));
+  }
+}
+
 EngineProcessResult EngineRuntime::process(const InboundEngineRecord& record,
                                            ProcessingMode mode) {
   ParsedEngineInput parsed = parser_.parse(record.raw_json);
@@ -1013,6 +1438,11 @@ EngineProcessResult EngineRuntime::process(const InboundEngineRecord& record,
       }
     }
     cleanup_completed_order_metadata(metadata_store_, core_events);
+    if (has_trade_executed(core_events)) {
+      auto liquidations = evaluate_automatic_liquidations_for_market(
+          input.market_id, record, input.input_id);
+      append_process_result(result, liquidations);
+    }
     mark_processed(RuntimeCommandKind::PlaceOrder,
                    record,
                    input.input_id,
@@ -1031,153 +1461,7 @@ EngineProcessResult EngineRuntime::process(const InboundEngineRecord& record,
 
     input.source = broker_context(record);
 
-    EngineProcessResult result;
-    const auto rejection_reason =
-        liquidation_rejection_reason(input, positions_, risk_states_);
-    if (!rejection_reason.empty()) {
-      result.replies.push_back(
-          make_liquidation_rejected_reply(record, input, rejection_reason));
-      mark_processed(RuntimeCommandKind::LiquidatePosition,
-                     record,
-                     input.input_id,
-                     input.envelope.idempotency_key);
-      return apply_processing_mode(std::move(result), mode);
-    }
-
-    const PositionRiskKey key{
-        .user_id = input.liquidated_user_id,
-        .market_id = input.market_id,
-    };
-    const auto previous_position = positions_.at(key);
-    const auto previous_risk = risk_states_.at(key);
-    const auto order_quantity = liquidation_quantity(input, previous_position);
-    const auto order_price =
-        liquidation_price(input, previous_position, mark_prices_);
-    const auto order_side =
-        liquidation_order_side(previous_position.signed_quantity);
-    const bool has_crossing_liquidity =
-        crossing_liquidity_exists(core_,
-                                  input.market_id,
-                                  order_side,
-                                  order_price);
-    const auto initial_adl_candidates =
-        adl_candidates_for(input,
-                           previous_position,
-                           positions_,
-                           risk_states_);
-    const auto initial_adl_available =
-        total_adl_available(initial_adl_candidates, order_quantity);
-    if (order_quantity <= 0 || order_price <= 0 ||
-        (!has_crossing_liquidity && initial_adl_available <= 0)) {
-      result.replies.push_back(make_liquidation_rejected_reply(
-          record, input, "no liquidation liquidity"));
-      mark_processed(RuntimeCommandKind::LiquidatePosition,
-                     record,
-                     input.input_id,
-                     input.envelope.idempotency_key);
-      return apply_processing_mode(std::move(result), mode);
-    }
-
-    auto synthetic =
-        synthetic_liquidation_order(input, previous_position, order_quantity, order_price);
-    auto mapped = cex::adapter::map_place_order_to_core(
-        synthetic, received_sequence(record));
-    if (!mapped.metadata_to_record.has_value()) {
-      throw std::runtime_error(
-          "liquidation order mapping did not produce metadata");
-    }
-
-    EngineEventTranslationContext context{
-        .command_kind = RuntimeCommandKind::LiquidatePosition,
-        .source = record,
-        .request_id = input.envelope.request_id,
-        .input_id = input.input_id,
-        .reply_partition = input.envelope.reply_partition,
-        .order_id = synthetic.order_id,
-        .market_id = input.market_id,
-        .can_open_resting_order = false,
-        .pending_metadata = *mapped.metadata_to_record,
-        .liquidation_id = input.liquidation_id,
-        .liquidated_user_id = input.liquidated_user_id,
-        .liquidation_position_side = input.position_side,
-    };
-
-    std::vector<EngineEvent> core_events;
-    if (has_crossing_liquidity) {
-      core_events = core_.process(mapped.command);
-    }
-    const bool has_core_trade = has_trade_executed(core_events);
-    if (has_crossing_liquidity && !has_core_trade &&
-        initial_adl_available <= 0) {
-      result.replies.clear();
-      result.events.clear();
-      result.replies.push_back(make_liquidation_rejected_reply(
-          record, input, "no liquidation liquidity"));
-      mark_processed(RuntimeCommandKind::LiquidatePosition,
-                     record,
-                     input.input_id,
-                     input.envelope.idempotency_key);
-      return apply_processing_mode(std::move(result), mode);
-    }
-
-    result.events.push_back(make_liquidation_started_event(record,
-                                                           input,
-                                                           previous_position,
-                                                           previous_risk,
-                                                           market_sequences_,
-                                                           clock_));
-    if (has_crossing_liquidity) {
-      auto translated = translator_.translate(core_events,
-                                              context,
-                                              metadata_store_,
-                                              positions_,
-                                              risk_states_,
-                                              mark_prices_,
-                                              market_sequences_,
-                                              clock_);
-      append_process_result(result, translated);
-      cleanup_completed_order_metadata(metadata_store_, core_events);
-    } else {
-      result.replies.push_back(make_liquidation_accepted_reply(
-          record, input, *mapped.metadata_to_record));
-    }
-
-    const auto remaining_position = positions_.find(key);
-    const auto pending_remaining =
-        context.pending_metadata.has_value()
-            ? context.pending_metadata->remaining_quantity
-            : std::int64_t{0};
-    const auto remaining_adl_quantity =
-        remaining_position == positions_.end()
-            ? 0
-            : std::min(pending_remaining,
-                       abs_quantity(remaining_position->second.signed_quantity));
-    if (remaining_adl_quantity > 0) {
-      (void)append_adl_fills(result,
-                             input,
-                             context,
-                             remaining_adl_quantity,
-                             order_price,
-                             translator_,
-                             metadata_store_,
-                             positions_,
-                             risk_states_,
-                             mark_prices_,
-                             market_sequences_,
-                             clock_);
-    }
-
-    const auto final_position = positions_.find(key);
-    const auto remaining_quantity =
-        final_position == positions_.end()
-            ? 0
-            : abs_quantity(final_position->second.signed_quantity);
-    result.events.push_back(make_liquidation_completed_event(record,
-                                                             input,
-                                                             remaining_quantity,
-                                                             market_sequences_,
-                                                             clock_));
-
+    auto result = execute_liquidation(record, input, true);
     mark_processed(RuntimeCommandKind::LiquidatePosition,
                    record,
                    input.input_id,
@@ -1199,6 +1483,15 @@ EngineProcessResult EngineRuntime::process(const InboundEngineRecord& record,
     result.events.push_back(make_mark_price_updated_event(
         record, input, market_sequences_, clock_));
     mark_prices_[input.market_id] = std::move(state);
+    append_mark_price_risk_updates(result,
+                                   record,
+                                   input.input_id,
+                                   input.market_id,
+                                   input.mark_price,
+                                   input.published_at_ms);
+    auto liquidations = evaluate_automatic_liquidations_for_market(
+        input.market_id, record, input.input_id);
+    append_process_result(result, liquidations);
     mark_input_processed(RuntimeCommandKind::MarkPriceUpdated,
                          record,
                          input.input_id);
@@ -1329,6 +1622,9 @@ EngineProcessResult EngineRuntime::process(const InboundEngineRecord& record,
     }
 
     settled_funding_intervals_.insert(settlement_key);
+    auto liquidations = evaluate_automatic_liquidations_for_market(
+        input.market_id, record, input.input_id);
+    append_process_result(result, liquidations);
     mark_input_processed(RuntimeCommandKind::FundingSettlementTick,
                          record,
                          input.input_id);

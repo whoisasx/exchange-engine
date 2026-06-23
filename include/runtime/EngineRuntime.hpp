@@ -93,6 +93,13 @@ class EngineRuntime {
   [[nodiscard]] const IsolatedRiskMap& risk_states() const noexcept;
   [[nodiscard]] EngineRuntimeStateSnapshot snapshot_state() const;
   void restore_state(const EngineRuntimeStateSnapshot& snapshot);
+  [[nodiscard]] EngineProcessResult evaluate_automatic_liquidations_for_market(
+      cex::adapter::MarketId market_id,
+      const InboundEngineRecord& source,
+      ProcessingMode mode = ProcessingMode::Live);
+  [[nodiscard]] EngineProcessResult evaluate_all_automatic_liquidations(
+      const InboundEngineRecord& source,
+      ProcessingMode mode = ProcessingMode::Live);
 
  private:
   struct ProcessedRuntimeRequest {
@@ -129,6 +136,24 @@ class EngineRuntime {
   [[nodiscard]] EngineEventTranslationContext make_translation_context(
       const InboundEngineRecord& record,
       const cex::adapter::CancelOrderInput& input) const;
+  [[nodiscard]] EngineProcessResult execute_liquidation(
+      const InboundEngineRecord& record,
+      const cex::adapter::LiquidatePositionInput& input,
+      bool emit_replies);
+  [[nodiscard]] EngineProcessResult evaluate_automatic_liquidations_for_market(
+      cex::adapter::MarketId market_id,
+      const InboundEngineRecord& source,
+      const std::optional<std::string>& source_input_id);
+  [[nodiscard]] EngineProcessResult evaluate_all_automatic_liquidations(
+      const InboundEngineRecord& source,
+      const std::optional<std::string>& source_input_id);
+  void append_mark_price_risk_updates(
+      EngineProcessResult& result,
+      const InboundEngineRecord& record,
+      const std::optional<std::string>& input_id,
+      cex::adapter::MarketId market_id,
+      cex::adapter::AdapterPrice mark_price,
+      std::int64_t updated_at_ms);
 
   EngineCore core_;
   cex::adapter::OrderMetadataStore metadata_store_;

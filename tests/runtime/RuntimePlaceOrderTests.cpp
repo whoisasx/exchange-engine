@@ -112,6 +112,17 @@ const EngineOutputRecord* find_record(
   return nullptr;
 }
 
+std::size_t count_records(const std::vector<EngineOutputRecord>& records,
+                          const std::string& type) {
+  std::size_t count = 0;
+  for (const auto& record : records) {
+    if (record.type == type) {
+      ++count;
+    }
+  }
+  return count;
+}
+
 std::string payload_number_text(const EngineOutputRecord& record,
                                 const std::string& field) {
   const auto* value = record.payload.at(field).as_number();
@@ -566,6 +577,32 @@ std::string funding_settlement_tick_json(
   return json.str();
 }
 
+std::string mark_price_json(const std::string& input_id,
+                            std::int64_t mark_price,
+                            std::int64_t index_price,
+                            std::int64_t source_sequence = 45'050) {
+  std::ostringstream json;
+  json << R"json({
+  "type": "MarkPriceUpdated",
+  "payload": {
+    "input_id": ")json"
+       << input_id << R"json(",
+    "market_id": 1,
+    "mark_price": )json"
+       << mark_price << R"json(,
+    "index_price": )json"
+       << index_price << R"json(,
+    "source_timestamp_ms": 1710000000000,
+    "published_at_ms": 1710000000100,
+    "valid_until_ms": 1710000005100,
+    "source_sequence": )json"
+       << source_sequence << R"json(,
+    "source_status": "VALID"
+  }
+})json";
+  return json.str();
+}
+
 std::string liquidation_json(
     const std::string& input_id = "input_liq_001",
     const std::string& request_id = "req_liq_001",
@@ -623,28 +660,22 @@ void open_opposite_positions(EngineRuntime& runtime) {
 }
 
 void open_liquidatable_short_position(EngineRuntime& runtime) {
-  const auto mark = R"json({
-  "type": "MarkPriceUpdated",
-  "payload": {
-    "input_id": "input_mark_liq_before_fill",
-    "market_id": 1,
-    "mark_price": 110,
-    "index_price": 109,
-    "source_timestamp_ms": 1710000000000,
-    "published_at_ms": 1710000000100,
-    "valid_until_ms": 1710000005100,
-    "source_sequence": 45011,
-    "source_status": "VALID"
-  }
-})json";
-  (void)runtime.process(make_record(mark, 1740));
-
-  const auto resting = read_file(
-      std::filesystem::path(PROTOCOL_EXAMPLES_DIR) /
-      "engine-place-order.command.json");
-  (void)runtime.process(make_record(resting, 1741));
-  const auto crossing = runtime.process(make_record(crossing_order_json(), 1742));
-  assert(crossing.status == EngineProcessStatus::Processed);
+  open_opposite_positions(runtime);
+  auto snapshot = runtime.snapshot_state();
+  snapshot.mark_prices[1] = MarkPriceState{
+      .market_id = 1,
+      .mark_price = 110,
+      .index_price = 109,
+      .source_timestamp_ms = 1'710'000'000'000LL,
+      .published_at_ms = 1'710'000'000'100LL,
+      .valid_until_ms = 1'710'000'005'100LL,
+      .source_sequence = 45'011,
+      .source_status = "VALID",
+  };
+  set_snapshot_position(snapshot, 42, 10, 100, 100, 110);
+  set_snapshot_position(snapshot, 43, -10, 100, 100, 110);
+  snapshot.public_sequences[1] = 10;
+  runtime.restore_state(snapshot);
   assert(runtime.risk_states()
              .at(PositionRiskKey{.user_id = 43, .market_id = 1})
              .equity == 0);
@@ -1066,8 +1097,8 @@ void test_mark_price_affects_fill_risk_state() {
   "payload": {
     "input_id": "input_mark_before_fill",
     "market_id": 1,
-    "mark_price": 110,
-    "index_price": 109,
+    "mark_price": 104,
+    "index_price": 103,
     "source_timestamp_ms": 1710000000000,
     "published_at_ms": 1710000000100,
     "valid_until_ms": 1710000005100,
@@ -1084,27 +1115,27 @@ void test_mark_price_affects_fill_risk_state() {
   const auto result = runtime.process(make_record(crossing_order_json(), 1202));
   assert(result.events.size() == 6);
   assert(result.events[1].type == "PositionChanged");
-  assert(payload_number_text(result.events[1], "mark_price") == "110");
-  assert(payload_number_text(result.events[1], "unrealized_pnl") == "100");
-  assert(payload_number_text(result.events[1], "maintenance_margin") == "55");
+  assert(payload_number_text(result.events[1], "mark_price") == "104");
+  assert(payload_number_text(result.events[1], "unrealized_pnl") == "40");
+  assert(payload_number_text(result.events[1], "maintenance_margin") == "52");
   assert(result.events[2].type == "RiskStateUpdated");
-  assert(payload_number_text(result.events[2], "mark_price") == "110");
-  assert(payload_number_text(result.events[2], "unrealized_pnl") == "100");
-  assert(payload_number_text(result.events[2], "equity") == "200");
-  assert(payload_number_text(result.events[2], "maintenance_margin") == "55");
-  assert(payload_number_text(result.events[2], "margin_ratio") == "36363");
+  assert(payload_number_text(result.events[2], "mark_price") == "104");
+  assert(payload_number_text(result.events[2], "unrealized_pnl") == "40");
+  assert(payload_number_text(result.events[2], "equity") == "140");
+  assert(payload_number_text(result.events[2], "maintenance_margin") == "52");
+  assert(payload_number_text(result.events[2], "margin_ratio") == "26923");
   assert(result.events[3].type == "PositionChanged");
-  assert(payload_number_text(result.events[3], "mark_price") == "110");
-  assert(payload_number_text(result.events[3], "unrealized_pnl") == "-100");
-  assert(payload_number_text(result.events[3], "maintenance_margin") == "55");
+  assert(payload_number_text(result.events[3], "mark_price") == "104");
+  assert(payload_number_text(result.events[3], "unrealized_pnl") == "-40");
+  assert(payload_number_text(result.events[3], "maintenance_margin") == "52");
   assert(result.events[4].type == "RiskStateUpdated");
-  assert(payload_number_text(result.events[4], "mark_price") == "110");
-  assert(payload_number_text(result.events[4], "unrealized_pnl") == "-100");
-  assert(payload_number_text(result.events[4], "equity") == "0");
-  assert(payload_number_text(result.events[4], "maintenance_margin") == "55");
-  assert(payload_number_text(result.events[4], "margin_ratio") == "0");
-  assert_risk_state(runtime, 42, 10, 110, 100);
-  assert_risk_state(runtime, 43, -10, 110, -100);
+  assert(payload_number_text(result.events[4], "mark_price") == "104");
+  assert(payload_number_text(result.events[4], "unrealized_pnl") == "-40");
+  assert(payload_number_text(result.events[4], "equity") == "60");
+  assert(payload_number_text(result.events[4], "maintenance_margin") == "52");
+  assert(payload_number_text(result.events[4], "margin_ratio") == "11538");
+  assert_risk_state(runtime, 42, 10, 104, 40);
+  assert_risk_state(runtime, 43, -10, 104, -40);
 }
 
 void test_runtime_cancel_order() {
@@ -1397,6 +1428,167 @@ void test_runtime_funding_settlement_missing_or_mismatched_rate_rejected() {
   assert(valid.status == EngineProcessStatus::Processed);
   assert(valid.events.size() == 3);
   assert(runtime.settled_funding_intervals().size() == 1);
+}
+
+void test_mark_price_update_triggers_automatic_liquidation() {
+  auto runtime = make_runtime();
+  open_opposite_positions(runtime);
+
+  const auto result = runtime.process(make_record(
+      mark_price_json("input_mark_auto_liq", 110, 109, 45'060), 1744));
+  assert(result.status == EngineProcessStatus::Processed);
+  assert(result.replies.empty());
+  assert(result.events[0].type == "MarkPriceUpdated");
+  assert(count_records(result.events, "RiskStateUpdated") >= 2);
+  assert(count_records(result.events, "LiquidationStarted") == 1);
+  assert(count_records(result.events, "LiquidationCompleted") == 1);
+  assert(find_record(result.events, "AdlExecuted") != nullptr);
+  assert(find_record(result.events, "LiquidationExecuted") == nullptr);
+
+  const auto* started = find_record(result.events, "LiquidationStarted");
+  assert(started != nullptr);
+  assert(started->payload.at("source_input_id") == "input_mark_auto_liq");
+  assert(payload_number_text(*started, "user_id") == "43");
+  assert(started->payload.at("side") == "SHORT");
+
+  const auto* completed = find_record(result.events, "LiquidationCompleted");
+  assert(completed != nullptr);
+  assert(completed->payload.at("final_status") == "FLAT");
+  assert(payload_number_text(*completed, "remaining_quantity") == "0");
+
+  assert_position_state(runtime, 42, 0, 0, 0);
+  assert_position_state(runtime, 43, 0, 0, 0);
+  assert(runtime.risk_states()
+             .at(PositionRiskKey{.user_id = 43, .market_id = 1})
+             .status == "FLAT");
+}
+
+void test_funding_settlement_triggers_automatic_liquidation() {
+  auto runtime = make_runtime();
+  open_opposite_positions(runtime);
+
+  const auto mark_result = runtime.process(make_record(
+      mark_price_json("input_mark_before_funding_auto", 99, 98, 45'061),
+      1745));
+  assert(mark_result.status == EngineProcessStatus::Processed);
+  assert(mark_result.replies.empty());
+  assert(find_record(mark_result.events, "LiquidationStarted") == nullptr);
+  assert(runtime.risk_states()
+             .at(PositionRiskKey{.user_id = 42, .market_id = 1})
+             .status == "HEALTHY");
+
+  (void)runtime.process(make_record(
+      funding_rate_settlement_json("input_funding_rate_auto_liq",
+                                   "funding_auto_liq",
+                                   50'000),
+      1746));
+
+  const auto result = runtime.process(make_record(
+      funding_settlement_tick_json("input_funding_settle_auto_liq",
+                                   "funding_auto_liq"),
+      1747));
+  assert(result.status == EngineProcessStatus::Processed);
+  assert(result.replies.empty());
+  assert(result.events[0].type == "FundingPaymentApplied");
+  assert(count_records(result.events, "RiskStateUpdated") >= 2);
+  assert(count_records(result.events, "LiquidationStarted") == 1);
+  assert(count_records(result.events, "LiquidationCompleted") == 1);
+  assert(find_record(result.events, "AdlExecuted") != nullptr);
+
+  const auto* started = find_record(result.events, "LiquidationStarted");
+  assert(started != nullptr);
+  assert(payload_number_text(*started, "user_id") == "42");
+  assert(started->payload.at("side") == "LONG");
+  assert(started->payload.at("source_input_id") ==
+         "input_funding_settle_auto_liq");
+
+  assert_position_state(runtime, 42, 0, 0, 0);
+  assert_position_state(runtime, 43, 0, 0, 0);
+  assert(runtime.settled_funding_intervals().contains(FundingSettlementKey{
+      .market_id = 1,
+      .funding_interval_id = "funding_auto_liq",
+  }));
+}
+
+void test_post_trade_automatic_check_leaves_healthy_users_alone() {
+  auto runtime = make_runtime();
+  const auto resting = read_file(
+      std::filesystem::path(PROTOCOL_EXAMPLES_DIR) /
+      "engine-place-order.command.json");
+  (void)runtime.process(make_record(resting, 1748));
+
+  const auto result = runtime.process(make_record(crossing_order_json(), 1749));
+  assert(result.status == EngineProcessStatus::Processed);
+  assert(result.replies.size() == 1);
+  assert(find_record(result.events, "LiquidationStarted") == nullptr);
+  assert(find_record(result.events, "LiquidationCompleted") == nullptr);
+  assert_position_state(runtime, 42, 10, 100, 100);
+  assert_position_state(runtime, 43, -10, 100, 100);
+  assert(runtime.risk_states()
+             .at(PositionRiskKey{.user_id = 42, .market_id = 1})
+             .status == "HEALTHY");
+  assert(runtime.risk_states()
+             .at(PositionRiskKey{.user_id = 43, .market_id = 1})
+             .status == "HEALTHY");
+}
+
+void test_automatic_partial_liquidation_does_not_reenter_same_trigger() {
+  auto runtime = make_runtime();
+  open_liquidatable_short_position(runtime);
+  auto snapshot = runtime.snapshot_state();
+  set_snapshot_position(snapshot, 42, 4, 100, 40, 110);
+  runtime.restore_state(snapshot);
+
+  const auto result = runtime.evaluate_automatic_liquidations_for_market(
+      1, make_record("", 1750));
+  assert(result.status == EngineProcessStatus::Processed);
+  assert(result.replies.empty());
+  assert(count_records(result.events, "LiquidationStarted") == 1);
+  assert(count_records(result.events, "AdlExecuted") == 1);
+  assert(count_records(result.events, "LiquidationCompleted") == 1);
+
+  const auto* completed = find_record(result.events, "LiquidationCompleted");
+  assert(completed != nullptr);
+  assert(completed->payload.at("final_status") == "PARTIAL");
+  assert(payload_number_text(*completed, "remaining_quantity") == "6");
+  assert_position_state(runtime, 42, 0, 0, 0);
+  assert_position_state(runtime, 43, -6, 100, 60);
+  assert(runtime.risk_states()
+             .at(PositionRiskKey{.user_id = 43, .market_id = 1})
+             .status == "LIQUIDATABLE");
+}
+
+void test_replay_silent_automatic_liquidation_updates_state_without_outputs() {
+  auto runtime = make_runtime();
+  open_opposite_positions(runtime);
+
+  const auto result = runtime.process_replay(make_record(
+      mark_price_json("input_mark_auto_liq_replay", 110, 109, 45'062),
+      1751));
+  assert(result.status == EngineProcessStatus::Processed);
+  assert(result.empty());
+  assert_position_state(runtime, 42, 0, 0, 0);
+  assert_position_state(runtime, 43, 0, 0, 0);
+  assert(runtime.risk_states()
+             .at(PositionRiskKey{.user_id = 43, .market_id = 1})
+             .status == "FLAT");
+}
+
+void test_recovery_catchup_hook_runs_automatic_liquidation_scan() {
+  auto prepared = make_runtime();
+  open_liquidatable_short_position(prepared);
+
+  auto runtime = make_runtime();
+  runtime.restore_state(prepared.snapshot_state());
+  const auto result =
+      runtime.evaluate_all_automatic_liquidations(make_record("", 1752));
+  assert(result.status == EngineProcessStatus::Processed);
+  assert(result.replies.empty());
+  assert(count_records(result.events, "LiquidationStarted") == 1);
+  assert(count_records(result.events, "LiquidationCompleted") == 1);
+  assert(find_record(result.events, "AdlExecuted") != nullptr);
+  assert_position_state(runtime, 42, 0, 0, 0);
+  assert_position_state(runtime, 43, 0, 0, 0);
 }
 
 void test_runtime_liquidation_rejected_for_no_position_or_healthy_risk() {
@@ -2314,6 +2506,12 @@ int main() {
     test_runtime_funding_settlement_applies_payments_and_updates_risk();
     test_runtime_funding_settlement_duplicate_input_and_interval_noop();
     test_runtime_funding_settlement_missing_or_mismatched_rate_rejected();
+    test_mark_price_update_triggers_automatic_liquidation();
+    test_funding_settlement_triggers_automatic_liquidation();
+    test_post_trade_automatic_check_leaves_healthy_users_alone();
+    test_automatic_partial_liquidation_does_not_reenter_same_trigger();
+    test_replay_silent_automatic_liquidation_updates_state_without_outputs();
+    test_recovery_catchup_hook_runs_automatic_liquidation_scan();
     test_runtime_liquidation_rejected_for_no_position_or_healthy_risk();
     test_runtime_liquidation_accepted_flattens_state_and_emits_lifecycle();
     test_liquidation_duplicate_input_and_idempotency_do_not_reapply();
