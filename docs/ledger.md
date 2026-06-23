@@ -34,7 +34,7 @@ Entry mapping:
 | `WithdrawalApplied` | `WITHDRAWAL`: `total_delta=-amount`, `locked_delta=0` |
 | `FundsReserved` | `RESERVE`: `total_delta=0`, `locked_delta=+amount` |
 | `FundsReleased` | `RELEASE`: `total_delta=0`, `locked_delta=-amount` |
-| `TradeSettled` | `TRADE_DEBIT`: `total_delta=-debit_amount`, `locked_delta=-debit_amount`; `TRADE_CREDIT`: `total_delta=+credit_amount`, `locked_delta=0` |
+| `TradeSettled` | `TRADE_DEBIT`: `total_delta=-debit_amount`, `locked_delta=0` for exact same-asset reservation consumption, otherwise `locked_delta=-debit_amount`; `TRADE_CREDIT`: `total_delta=+credit_amount`, `locked_delta=0` |
 | `AccountDeltaApplied` | `<kind>`: `total_delta=total_delta`, `locked_delta=locked_delta` |
 
 Ledger starts from stored offsets, or earliest offsets when no offset is stored.

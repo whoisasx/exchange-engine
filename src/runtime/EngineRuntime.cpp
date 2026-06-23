@@ -216,6 +216,12 @@ template <typename Value>
          (side == cex::adapter::AdapterSide::Short && signed_quantity < 0);
 }
 
+[[nodiscard]] bool side_reduces_position(cex::adapter::AdapterSide side,
+                                         std::int64_t signed_quantity) {
+  return (side == cex::adapter::AdapterSide::Long && signed_quantity < 0) ||
+         (side == cex::adapter::AdapterSide::Short && signed_quantity > 0);
+}
+
 [[nodiscard]] cex::adapter::AdapterSide liquidation_order_side(
     std::int64_t signed_quantity) {
   return signed_quantity > 0 ? cex::adapter::AdapterSide::Short
@@ -337,6 +343,51 @@ struct AutomaticLiquidationCandidate {
   IsolatedRiskState risk;
   std::int64_t notional{0};
 };
+
+struct ReduceOnlyCheck {
+  bool allowed{true};
+  std::string reason;
+  cex::adapter::AdapterQuantity capped_quantity{0};
+};
+
+[[nodiscard]] ReduceOnlyCheck check_reduce_only_order(
+    const cex::adapter::PlaceOrderInput& input,
+    const IsolatedPositionMap& positions) {
+  if (!input.reduce_only) {
+    return ReduceOnlyCheck{
+        .allowed = true,
+        .reason = {},
+        .capped_quantity = input.quantity,
+    };
+  }
+
+  const PositionRiskKey key{
+      .user_id = input.envelope.user_id,
+      .market_id = input.market_id,
+  };
+  const auto position = positions.find(key);
+  if (position == positions.end() || position->second.signed_quantity == 0) {
+    return ReduceOnlyCheck{
+        .allowed = false,
+        .reason = "reduce_only_no_position",
+        .capped_quantity = 0,
+    };
+  }
+  if (!side_reduces_position(input.side, position->second.signed_quantity)) {
+    return ReduceOnlyCheck{
+        .allowed = false,
+        .reason = "reduce_only_wrong_side",
+        .capped_quantity = 0,
+    };
+  }
+
+  return ReduceOnlyCheck{
+      .allowed = true,
+      .reason = {},
+      .capped_quantity =
+          std::min(input.quantity, abs_quantity(position->second.signed_quantity)),
+  };
+}
 
 [[nodiscard]] bool has_opposing_exposure(std::int64_t liquidated_quantity,
                                          std::int64_t candidate_quantity) {
@@ -544,6 +595,75 @@ void add_runtime_engine_fields(
       .partition = std::nullopt,
       .payload = std::move(payload),
   };
+}
+
+[[nodiscard]] EngineOutputRecord make_order_rejected_reply(
+    const InboundEngineRecord& record,
+    const cex::adapter::PlaceOrderInput& input,
+    std::string reason) {
+  PayloadFields payload{
+      {"order_id", number_value(input.order_id)},
+      {"reason", std::move(reason)},
+  };
+  if (!input.reservation_id.empty()) {
+    payload.emplace("reservation_id", input.reservation_id);
+  }
+  payload.emplace("request_id", input.envelope.request_id);
+  add_runtime_source_fields(payload, record, input.input_id);
+
+  return EngineOutputRecord{
+      .topic = EngineRepliesTopic,
+      .type = "OrderRejected",
+      .key = input.envelope.request_id,
+      .partition = input.envelope.reply_partition,
+      .payload = std::move(payload),
+  };
+}
+
+[[nodiscard]] EngineOutputRecord make_reservation_released_event(
+    const InboundEngineRecord& record,
+    const cex::adapter::PlaceOrderInput& input,
+    std::int64_t released_amount,
+    std::string reason,
+    cex::adapter::MarketSequenceGenerator& market_sequences,
+    const EngineRuntimeClock& clock) {
+  PayloadFields payload{
+      {"reservation_id", input.reservation_id},
+      {"user_id", number_value(input.envelope.user_id)},
+      {"asset", input.margin_asset.empty() ? "USDC" : input.margin_asset},
+      {"released_amount", number_value(released_amount)},
+      {"reason", std::move(reason)},
+  };
+  return make_runtime_market_event("ReservationReleased",
+                                   input.market_id,
+                                   record,
+                                   input.input_id,
+                                   market_sequences,
+                                   clock,
+                                   std::move(payload));
+}
+
+[[nodiscard]] EngineOutputRecord make_reduce_only_expired_event(
+    const InboundEngineRecord& record,
+    const cex::adapter::OrderMetadata& metadata,
+    std::int64_t expired_quantity,
+    cex::adapter::MarketSequenceGenerator& market_sequences,
+    const EngineRuntimeClock& clock) {
+  PayloadFields payload{
+      {"order_id", number_value(metadata.order_id)},
+      {"reservation_id", metadata.reservation_id},
+      {"user_id", number_value(metadata.user_id)},
+      {"expired_quantity", number_value(expired_quantity)},
+      {"released_amount", number_value(metadata.remaining_reserved_margin)},
+      {"reason", "REDUCE_ONLY_REMAINDER"},
+  };
+  return make_runtime_market_event("OrderExpired",
+                                   metadata.market_id,
+                                   record,
+                                   metadata.place_input_id,
+                                   market_sequences,
+                                   clock,
+                                   std::move(payload));
 }
 
 [[nodiscard]] cex::adapter::AdapterPrice settlement_mark_price_for(
@@ -1013,6 +1133,39 @@ void append_process_result(EngineProcessResult& result,
   return result;
 }
 
+[[nodiscard]] EngineProcessResult reduce_only_rejected_result(
+    const InboundEngineRecord& record,
+    const cex::adapter::PlaceOrderInput& input,
+    const std::string& reason,
+    cex::adapter::MarketSequenceGenerator& market_sequences,
+    const EngineRuntimeClock& clock) {
+  EngineProcessResult result;
+  result.replies.push_back(make_order_rejected_reply(record, input, reason));
+  if (!input.reservation_id.empty() && input.reserved_margin_amount > 0) {
+    result.events.push_back(make_reservation_released_event(
+        record,
+        input,
+        input.reserved_margin_amount,
+        "ORDER_REJECTED_AFTER_RESERVATION",
+        market_sequences,
+        clock));
+  }
+  return result;
+}
+
+[[nodiscard]] std::int64_t reduce_only_filled_quantity(
+    OrderId order_id,
+    const std::vector<EngineEvent>& core_events) {
+  std::int64_t filled = 0;
+  for (const auto& event : core_events) {
+    if (const auto* trade = std::get_if<TradeExecuted>(&event);
+        trade != nullptr && trade->takerOrderId == order_id) {
+      filled += static_cast<std::int64_t>(trade->quantity.lots());
+    }
+  }
+  return filled;
+}
+
 EngineProcessResult apply_processing_mode(EngineProcessResult result,
                                           ProcessingMode mode) {
   if (mode == ProcessingMode::ReplaySilent) {
@@ -1411,14 +1564,38 @@ EngineProcessResult EngineRuntime::process(const InboundEngineRecord& record,
 
     input.source = broker_context(record);
 
-    auto mapped =
-        cex::adapter::map_place_order_to_core(input, received_sequence(record));
+    const auto reduce_only = check_reduce_only_order(input, positions_);
+    if (!reduce_only.allowed) {
+      auto result = reduce_only_rejected_result(record,
+                                                input,
+                                                reduce_only.reason,
+                                                market_sequences_,
+                                                clock_);
+      mark_processed(RuntimeCommandKind::PlaceOrder,
+                     record,
+                     input.input_id,
+                     input.envelope.idempotency_key);
+      return apply_processing_mode(std::move(result), mode);
+    }
+
+    auto core_input = input;
+    if (input.reduce_only) {
+      core_input.quantity = reduce_only.capped_quantity;
+      core_input.time_in_force = cex::adapter::AdapterTimeInForce::Ioc;
+    }
+
+    auto mapped = cex::adapter::map_place_order_to_core(
+        core_input, received_sequence(record));
     if (!mapped.metadata_to_record.has_value()) {
       throw std::runtime_error("place order mapping did not produce metadata");
     }
+    if (input.reduce_only) {
+      mapped.metadata_to_record->original_quantity = input.quantity;
+      mapped.metadata_to_record->remaining_quantity = input.quantity;
+    }
 
     auto context =
-        make_translation_context(record, input, *mapped.metadata_to_record);
+        make_translation_context(record, core_input, *mapped.metadata_to_record);
     auto core_events = core_.process(mapped.command);
     auto result = translator_.translate(core_events,
                                         context,
@@ -1438,6 +1615,22 @@ EngineProcessResult EngineRuntime::process(const InboundEngineRecord& record,
       }
     }
     cleanup_completed_order_metadata(metadata_store_, core_events);
+    if (input.reduce_only && has_order_accepted(core_events) &&
+        context.pending_metadata.has_value()) {
+      const auto filled_quantity =
+          reduce_only_filled_quantity(context.pending_metadata->order_id,
+                                      core_events);
+      const auto expired_quantity = input.quantity - filled_quantity;
+      if (expired_quantity > 0) {
+        result.events.push_back(make_reduce_only_expired_event(
+            record,
+            *context.pending_metadata,
+            expired_quantity,
+            market_sequences_,
+            clock_));
+      }
+      (void)metadata_store_.erase(context.pending_metadata->order_id);
+    }
     if (has_trade_executed(core_events)) {
       auto liquidations = evaluate_automatic_liquidations_for_market(
           input.market_id, record, input.input_id);
@@ -1577,36 +1770,23 @@ EngineProcessResult EngineRuntime::process(const InboundEngineRecord& record,
           {"amount", number_value(amount)},
       }));
 
-      auto& risk = risk_states_[key];
-      if (risk.user_id == 0 && risk.market_id == 0) {
-        risk.user_id = position.user_id;
-        risk.market_id = position.market_id;
-        risk.equity = position.isolated_margin;
-      }
-      risk.user_id = position.user_id;
-      risk.market_id = position.market_id;
-      risk.margin_asset = settlement_asset_for(position);
-      risk.signed_quantity = position.signed_quantity;
-      risk.average_entry_price = position.average_entry_price;
-      risk.mark_price = mark_price;
-      risk.isolated_margin = position.isolated_margin;
-      risk.unrealized_pnl =
-          (mark_price - position.average_entry_price) *
-          position.signed_quantity;
+      const auto previous_risk = risk_states_.find(key);
+      auto risk = risk_from_position(
+          position,
+          mark_price,
+          input.settle_at_ms,
+          previous_risk == risk_states_.end() ? nullptr : &previous_risk->second);
       risk.equity += amount;
-      risk.maintenance_margin =
-          maintenance_margin_for(position.signed_quantity, mark_price);
       risk.margin_ratio =
           margin_ratio_for(risk.equity, risk.maintenance_margin);
-      risk.leverage = position.leverage;
-      risk.updated_at_ms = input.settle_at_ms;
-      if (position.signed_quantity == 0) {
+      if (risk.signed_quantity == 0) {
         risk.status = "FLAT";
       } else if (risk.equity <= risk.maintenance_margin) {
         risk.status = "LIQUIDATABLE";
       } else {
         risk.status = "HEALTHY";
       }
+      risk_states_[key] = risk;
       paid_keys.push_back(key);
     }
 

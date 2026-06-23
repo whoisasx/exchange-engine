@@ -1,5 +1,6 @@
 #include "runtime/EngineEventTranslator.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -220,6 +221,10 @@ void add_engine_fields(PayloadFields& payload,
     cex::adapter::AdapterPrice price) {
   const auto original_quantity = metadata.original_quantity;
   if (metadata.reserved_margin_amount > 0 && original_quantity > 0) {
+    if (metadata.remaining_quantity > 0 &&
+        fill_quantity >= metadata.remaining_quantity) {
+      return metadata.remaining_reserved_margin;
+    }
     auto allocated =
         (metadata.reserved_margin_amount * fill_quantity) / original_quantity;
     if (allocated > metadata.remaining_reserved_margin) {
@@ -237,8 +242,13 @@ void add_engine_fields(PayloadFields& payload,
   const auto original_quantity = metadata.original_quantity;
   std::int64_t allocated = 0;
   if (metadata.reserved_margin_amount > 0 && original_quantity > 0) {
-    allocated = (metadata.reserved_margin_amount * fill_quantity) /
-                original_quantity;
+    if (metadata.remaining_quantity > 0 &&
+        fill_quantity >= metadata.remaining_quantity) {
+      allocated = metadata.remaining_reserved_margin;
+    } else {
+      allocated = (metadata.reserved_margin_amount * fill_quantity) /
+                  original_quantity;
+    }
     if (allocated > metadata.remaining_reserved_margin) {
       allocated = metadata.remaining_reserved_margin;
     }
@@ -354,6 +364,42 @@ void apply_position_fill(IsolatedPositionState& position,
   };
 }
 
+struct FillAccountEffect {
+  std::int64_t realized_pnl{0};
+  std::int64_t released_margin{0};
+};
+
+[[nodiscard]] FillAccountEffect account_effect_for_fill(
+    const IsolatedPositionState& position,
+    std::int64_t signed_fill,
+    cex::adapter::AdapterPrice fill_price) {
+  if (position.signed_quantity == 0 ||
+      same_direction(position.signed_quantity, signed_fill)) {
+    return {};
+  }
+
+  const auto old_abs = abs_quantity(position.signed_quantity);
+  const auto fill_abs = abs_quantity(signed_fill);
+  const auto closed_quantity = std::min(old_abs, fill_abs);
+  const auto released_margin =
+      closed_quantity >= old_abs
+          ? position.isolated_margin
+          : (position.isolated_margin * closed_quantity) / old_abs;
+  const auto realized_pnl =
+      position.signed_quantity > 0
+          ? (fill_price - position.average_entry_price) * closed_quantity
+          : (position.average_entry_price - fill_price) * closed_quantity;
+
+  return FillAccountEffect{
+      .realized_pnl = realized_pnl,
+      .released_margin = released_margin,
+  };
+}
+
+[[nodiscard]] bool has_account_delta(const FillAccountEffect& effect) {
+  return effect.realized_pnl != 0 || effect.released_margin != 0;
+}
+
 [[nodiscard]] const char* fill_reason_text(
     const EngineEventTranslationContext& context) {
   if (context.adl_execution) {
@@ -364,10 +410,71 @@ void apply_position_fill(IsolatedPositionState& position,
              : "TRADE";
 }
 
+[[nodiscard]] const char* account_delta_reason_text(
+    const EngineEventTranslationContext& context) {
+  if (context.adl_execution) {
+    return "ADL_SETTLEMENT";
+  }
+  return context.command_kind == RuntimeCommandKind::LiquidatePosition
+             ? "LIQUIDATION_SETTLEMENT"
+             : "POSITION_CLOSE_SETTLEMENT";
+}
+
+[[nodiscard]] std::string account_delta_reference_id(
+    const TradeExecuted& trade,
+    const EngineEventTranslationContext& context) {
+  if (context.adl_execution && !context.adl_id.empty()) {
+    return context.adl_id;
+  }
+  if (context.command_kind == RuntimeCommandKind::LiquidatePosition &&
+      !context.liquidation_id.empty()) {
+    return context.liquidation_id;
+  }
+  return "fill_" + text(trade.tradeId);
+}
+
+[[nodiscard]] std::string account_delta_asset_for(
+    const IsolatedPositionState& position,
+    const cex::adapter::OrderMetadata& metadata) {
+  if (!position.margin_asset.empty()) {
+    return position.margin_asset;
+  }
+  return metadata.margin_asset.empty() ? "USDC" : metadata.margin_asset;
+}
+
+[[nodiscard]] EngineOutputRecord make_account_delta_event(
+    const cex::adapter::OrderMetadata& metadata,
+    const IsolatedPositionState& previous_position,
+    const TradeExecuted& trade,
+    const FillAccountEffect& effect,
+    const EngineEventTranslationContext& context,
+    cex::adapter::MarketSequenceGenerator& market_sequences,
+    const EngineRuntimeClock& clock) {
+  PayloadFields payload{
+      {"account_delta_id",
+       "acct_fill_" + text(trade.tradeId) + "_" + text(metadata.user_id) +
+           "_" + text(metadata.order_id)},
+      {"user_id", number_value(metadata.user_id)},
+      {"asset", account_delta_asset_for(previous_position, metadata)},
+      {"total_delta", number_value(effect.realized_pnl)},
+      {"locked_delta", number_value(-effect.released_margin)},
+      {"reason", account_delta_reason_text(context)},
+      {"reference_id", account_delta_reference_id(trade, context)},
+  };
+
+  return make_event("AccountDelta",
+                    metadata.market_id,
+                    context,
+                    market_sequences,
+                    clock,
+                    std::move(payload));
+}
+
 [[nodiscard]] EngineOutputRecord make_position_changed_event(
     const IsolatedPositionState& position,
     std::int64_t fill_quantity,
     cex::adapter::AdapterPrice fill_price,
+    std::int64_t realized_pnl,
     cex::adapter::AdapterPrice mark_price,
     const EngineEventTranslationContext& context,
     cex::adapter::MarketSequenceGenerator& market_sequences,
@@ -386,7 +493,7 @@ void apply_position_fill(IsolatedPositionState& position,
       {"entry_price", number_value(position.average_entry_price)},
       {"mark_price", number_value(mark_price)},
       {"isolated_margin", number_value(position.isolated_margin)},
-      {"realized_pnl", number_value(0)},
+      {"realized_pnl", number_value(realized_pnl)},
       {"unrealized_pnl", number_value(unrealized_pnl)},
       {"maintenance_margin", number_value(maintenance_margin)},
       {"liquidation_price", number_value(0)},
@@ -458,6 +565,7 @@ void append_position_and_risk_updates(
       continue;
     }
 
+    const auto signed_fill = signed_fill_quantity(*metadata, fill_quantity);
     const auto allocated_margin =
         allocate_fill_margin(*metadata, fill_quantity, fill_price);
     const auto key = PositionRiskKey{
@@ -465,9 +573,12 @@ void append_position_and_risk_updates(
         .market_id = metadata->market_id,
     };
     auto& position = positions[key];
+    const auto previous_position = position;
+    const auto account_effect =
+        account_effect_for_fill(previous_position, signed_fill, fill_price);
     apply_position_fill(position,
                         *metadata,
-                        signed_fill_quantity(*metadata, fill_quantity),
+                        signed_fill,
                         fill_price,
                         allocated_margin,
                         timestamp_ms);
@@ -478,9 +589,19 @@ void append_position_and_risk_updates(
         timestamp_ms);
     risk_states[key] = risk;
 
+    if (has_account_delta(account_effect)) {
+      result.events.push_back(make_account_delta_event(*metadata,
+                                                       previous_position,
+                                                       trade,
+                                                       account_effect,
+                                                       context,
+                                                       market_sequences,
+                                                       clock));
+    }
     result.events.push_back(make_position_changed_event(position,
                                                         fill_quantity,
                                                         fill_price,
+                                                        account_effect.realized_pnl,
                                                         risk.mark_price,
                                                         context,
                                                         market_sequences,
@@ -539,10 +660,20 @@ void append_order_accepted(
                  std::move(event_payload)));
 }
 
+[[nodiscard]] std::string settlement_asset_for(
+    const cex::adapter::OrderMetadata* metadata) {
+  if (metadata == nullptr || metadata->margin_asset.empty()) {
+    return "USDC";
+  }
+  return metadata->margin_asset;
+}
+
 void append_order_rejected(EngineProcessResult& result,
                            const OrderRejected& rejected,
                            const EngineEventTranslationContext& context,
-                           const cex::adapter::OrderMetadataStore& metadata_store) {
+                           const cex::adapter::OrderMetadataStore& metadata_store,
+                           cex::adapter::MarketSequenceGenerator& market_sequences,
+                           const EngineRuntimeClock& clock) {
   PayloadFields payload{{"reason", reason_text(rejected.reason)}};
 
   const auto order_id = rejected.orderId.value_or(context.order_id);
@@ -550,8 +681,8 @@ void append_order_rejected(EngineProcessResult& result,
     payload.emplace("order_id", text(order_id));
   }
 
-  if (const auto* metadata = find_metadata(order_id, context, metadata_store);
-      metadata != nullptr) {
+  const auto* metadata = find_metadata(order_id, context, metadata_store);
+  if (metadata != nullptr) {
     payload.emplace("reservation_id", metadata->reservation_id);
   }
 
@@ -563,14 +694,26 @@ void append_order_rejected(EngineProcessResult& result,
     payload.emplace("liquidation_id", context.liquidation_id);
   }
   result.replies.push_back(make_reply(reply_type, context, std::move(payload)));
-}
 
-[[nodiscard]] std::string settlement_asset_for(
-    const cex::adapter::OrderMetadata* metadata) {
-  if (metadata == nullptr || metadata->margin_asset.empty()) {
-    return "USDC";
+  if (context.command_kind != RuntimeCommandKind::PlaceOrder ||
+      metadata == nullptr || metadata->reservation_id.empty() ||
+      metadata->remaining_reserved_margin <= 0) {
+    return;
   }
-  return metadata->margin_asset;
+
+  PayloadFields event_payload{
+      {"reservation_id", metadata->reservation_id},
+      {"user_id", number_value(metadata->user_id)},
+      {"asset", settlement_asset_for(metadata)},
+      {"released_amount", number_value(metadata->remaining_reserved_margin)},
+      {"reason", "ORDER_REJECTED_AFTER_RESERVATION"},
+  };
+  result.events.push_back(make_event("ReservationReleased",
+                                     metadata->market_id,
+                                     context,
+                                     market_sequences,
+                                     clock,
+                                     std::move(event_payload)));
 }
 
 [[nodiscard]] std::int64_t liquidation_fee_for(
@@ -594,10 +737,46 @@ void append_order_rejected(EngineProcessResult& result,
       PayloadValue::object(PayloadValue::Object{
           {"user_id", number_value(context.liquidated_user_id)},
           {"asset", settlement_asset_for(taker)},
-          {"amount", number_value(-liquidation_fee_for_context(trade,
-                                                                context))},
-          {"reason", "LIQUIDATION_FEE"},
+          {"amount", number_value(liquidation_fee_for_context(trade,
+                                                               context))},
+          {"fee_type", "LIQUIDATION"},
       })};
+}
+
+void append_settlement_for(PayloadValue::Array& settlements,
+                           const cex::adapter::OrderMetadata* metadata,
+                           const TradeExecuted& trade) {
+  if (metadata == nullptr || metadata->reservation_id.empty() ||
+      metadata->reduce_only) {
+    return;
+  }
+
+  const auto margin = preview_fill_margin(
+      *metadata,
+      static_cast<std::int64_t>(trade.quantity.lots()),
+      trade.price.ticks());
+  if (margin <= 0) {
+    return;
+  }
+
+  const auto asset = settlement_asset_for(metadata);
+  settlements.push_back(PayloadValue::object(PayloadValue::Object{
+      {"reservation_id", metadata->reservation_id},
+      {"debit_asset", asset},
+      {"debit_amount", number_value(margin)},
+      {"credit_asset", asset},
+      {"credit_amount", number_value(margin)},
+  }));
+}
+
+[[nodiscard]] PayloadValue::Array normal_settlements(
+    const TradeExecuted& trade,
+    const cex::adapter::OrderMetadata* maker,
+    const cex::adapter::OrderMetadata* taker) {
+  PayloadValue::Array settlements;
+  append_settlement_for(settlements, maker, trade);
+  append_settlement_for(settlements, taker, trade);
+  return settlements;
 }
 
 [[nodiscard]] PayloadValue::Array liquidation_settlements(
@@ -703,9 +882,11 @@ void append_trade_executed(
                                ? liquidation_fee_deltas(trade, taker, context)
                                : PayloadValue::Array{})},
       {"settlements",
-       PayloadValue::array(is_liquidation && !is_adl
-                               ? liquidation_settlements(trade, maker)
-                               : PayloadValue::Array{})},
+       PayloadValue::array(is_liquidation
+                               ? (!is_adl ? liquidation_settlements(trade,
+                                                                    maker)
+                                          : PayloadValue::Array{})
+                               : normal_settlements(trade, maker, taker))},
   };
   if (maker != nullptr) {
     payload.emplace("maker_user_id", text(maker->user_id));
@@ -774,11 +955,14 @@ void append_order_cancelled(
   PayloadFields payload{
       {"order_id", text(cancelled.orderId)},
       {"released_quantity", text(cancelled.releasedQuantity.lots())},
-      {"released_amount", text(cancelled.releasedQuantity.lots())},
   };
   if (metadata != nullptr) {
     payload.emplace("reservation_id", metadata->reservation_id);
     payload.emplace("user_id", text(metadata->user_id));
+    payload.emplace("released_amount",
+                    number_value(metadata->remaining_reserved_margin));
+  } else {
+    payload.emplace("released_amount", number_value(0));
   }
 
   result.events.push_back(make_event("OrderCancelled",
@@ -847,7 +1031,12 @@ EngineProcessResult EngineEventTranslator::translate(
       continue;
     }
     if (const auto* rejected = std::get_if<OrderRejected>(&event)) {
-      append_order_rejected(result, *rejected, context, metadata_store);
+      append_order_rejected(result,
+                            *rejected,
+                            context,
+                            metadata_store,
+                            market_sequences,
+                            clock);
       continue;
     }
     if (const auto* trade = std::get_if<TradeExecuted>(&event)) {

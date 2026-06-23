@@ -359,6 +359,58 @@ void test_checkpoint_failure_does_not_commit() {
   assert(result.error == "checkpoint disk full");
 }
 
+void test_publish_helper_uses_outbox_without_commit() {
+  FakeConsumer consumer({});
+  FakeProducer producer;
+  FakeCommitter committer;
+  auto runtime = make_runtime();
+  RedpandaEngineApp app(consumer, producer, committer, runtime);
+
+  cex::runtime::EngineProcessResult process_result;
+  process_result.replies.push_back(cex::runtime::EngineOutputRecord{
+      .topic = EngineRepliesTopic,
+      .type = "StartupReply",
+      .key = "reply-key",
+      .partition = 0,
+      .payload = {},
+  });
+  process_result.events.push_back(cex::runtime::EngineOutputRecord{
+      .topic = EngineEventsTopic,
+      .type = "StartupEvent",
+      .key = "event-key",
+      .partition = std::nullopt,
+      .payload = {},
+  });
+
+  const auto publish_result = app.publish(process_result);
+
+  assert(publish_result.ok());
+  assert(publish_result.attempted == 2);
+  assert(publish_result.published == 2);
+  assert(producer.records.size() == 2);
+  assert(producer.records[0].topic == EngineRepliesTopic);
+  assert(producer.records[0].key == "reply-key");
+  assert(producer.records[1].topic == EngineEventsTopic);
+  assert(producer.records[1].key == "event-key");
+  assert(committer.commits.empty());
+}
+
+void test_publish_helper_empty_result_is_clean_noop() {
+  FakeConsumer consumer({});
+  FakeProducer producer;
+  FakeCommitter committer;
+  auto runtime = make_runtime();
+  RedpandaEngineApp app(consumer, producer, committer, runtime);
+
+  const auto publish_result = app.publish(cex::runtime::EngineProcessResult{});
+
+  assert(publish_result.ok());
+  assert(publish_result.attempted == 0);
+  assert(publish_result.published == 0);
+  assert(producer.records.empty());
+  assert(committer.commits.empty());
+}
+
 void test_duplicate_no_output_result_commits_without_publishes() {
   const auto place_order = place_order_fixture();
   FakeConsumer consumer(
@@ -437,6 +489,8 @@ int main() {
     test_successful_place_order_publishes_then_commits();
     test_publish_failure_does_not_commit();
     test_checkpoint_failure_does_not_commit();
+    test_publish_helper_uses_outbox_without_commit();
+    test_publish_helper_empty_result_is_clean_noop();
     test_duplicate_no_output_result_commits_without_publishes();
     test_rejected_no_output_result_commits_without_publishes();
     test_wrong_input_topic_is_rejected_without_commit();

@@ -157,6 +157,8 @@ class RedpandaEngineApp {
 
   [[nodiscard]] EngineBrokerAppResult poll_once();
   [[nodiscard]] EngineBrokerAppResult consume(const ConsumedRecord& record);
+  [[nodiscard]] runtime::EnginePublishResult publish(
+      const runtime::EngineProcessResult& process_result);
 
  private:
   [[nodiscard]] bool duplicate_source_is_safe(

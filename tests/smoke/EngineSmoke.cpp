@@ -240,6 +240,41 @@ void require_price_level_delta(const protocol::JsonValue& value,
              label + ".quantity");
 }
 
+void require_json_string_field(const protocol::JsonValue& value,
+                               const std::string& field,
+                               const std::string& expected,
+                               const std::string& label) {
+  const auto* child = value.find(field);
+  require(child != nullptr, label + " missing " + field);
+  require(child->as_string() != nullptr, label + "." + field +
+                                         " is not a string");
+  require_eq(*child->as_string(), expected, label + "." + field);
+}
+
+void require_json_number_field(const protocol::JsonValue& value,
+                               const std::string& field,
+                               const std::string& expected,
+                               const std::string& label) {
+  const auto* child = value.find(field);
+  require(child != nullptr, label + " missing " + field);
+  require(child->as_number() != nullptr, label + "." + field +
+                                         " is not a number");
+  require_eq(child->as_number()->text, expected, label + "." + field);
+}
+
+void require_trade_settlement(const protocol::JsonValue& value,
+                              const std::string& reservation_id,
+                              const std::string& asset,
+                              const std::string& amount,
+                              const std::string& label) {
+  require(value.as_object() != nullptr, label + " is not an object");
+  require_json_string_field(value, "reservation_id", reservation_id, label);
+  require_json_string_field(value, "debit_asset", asset, label);
+  require_json_number_field(value, "debit_amount", amount, label);
+  require_json_string_field(value, "credit_asset", asset, label);
+  require_json_number_field(value, "credit_amount", amount, label);
+}
+
 const CapturingPublisher::PublishedRecord& require_published_type(
     const std::vector<CapturingPublisher::PublishedRecord>& records,
     const std::string& type) {
@@ -410,10 +445,20 @@ void run_resting_crossing_and_duplicate_smoke() {
                  require_payload_array(trade_message, "fee_deltas").size()),
              0,
              "trade fee_deltas count");
-  require_eq(static_cast<std::int64_t>(
-                 require_payload_array(trade_message, "settlements").size()),
-             0,
+  const auto& settlements = require_payload_array(trade_message, "settlements");
+  require_eq(static_cast<std::int64_t>(settlements.size()),
+             2,
              "trade settlements count");
+  require_trade_settlement(settlements[0],
+                           "res_place_001",
+                           "USDC",
+                           "100",
+                           "maker settlement");
+  require_trade_settlement(settlements[1],
+                           "res_taker_001",
+                           "USDC",
+                           "100",
+                           "taker settlement");
 
   const auto maker_position_message =
       parse_published_output(crossing.published[2]);
@@ -549,6 +594,7 @@ void run_cancel_smoke() {
   require_payload(cancelled_message, "order_id", "9001");
   require_payload(cancelled_message, "reservation_id", "res_place_001");
   require_payload(cancelled_message, "released_quantity", "10");
+  require_payload(cancelled_message, "released_amount", "100");
   require_payload(cancelled_message, "market_id", "1");
 
   const auto& delta = require_published_type(cancel.published, "OrderBookDelta");

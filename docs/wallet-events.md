@@ -55,7 +55,7 @@ user_id, fill_id, reservation_id, debit_asset, debit_amount, credit_asset, credi
 Ledger entries:
 
 ```text
-kind=TRADE_DEBIT, total_delta=-debit_amount, locked_delta=-debit_amount, reference_id=fill_id
+kind=TRADE_DEBIT, total_delta=-debit_amount, locked_delta=0 for exact same-asset reservation consumption, otherwise -debit_amount, reference_id=fill_id
 kind=TRADE_CREDIT, total_delta=+credit_amount, locked_delta=0, reference_id=fill_id
 ```
 

@@ -698,9 +698,19 @@ void test_replay_recovery_matches_uninterrupted_runtime() {
       runtime_a.process(make_runtime_record(mark_update, 1202));
   assert(live_mark.status == cex::runtime::EngineProcessStatus::Processed);
   assert(live_mark.replies.empty());
-  assert(live_mark.events.size() == 1);
+  assert(live_mark.events.size() == 3);
   assert(live_mark.events[0].type == "MarkPriceUpdated");
   assert(live_mark.events[0].payload.at("engine_sequence") == "9");
+  assert(live_mark.events[1].type == "RiskStateUpdated");
+  assert(live_mark.events[1]
+             .payload.at("engine_sequence")
+             .as_number()
+             ->text == "10");
+  assert(live_mark.events[2].type == "RiskStateUpdated");
+  assert(live_mark.events[2]
+             .payload.at("engine_sequence")
+             .as_number()
+             ->text == "11");
   assert_mark_price_state(runtime_a.mark_prices().at(1), 101, 100, 45'002);
 
   const auto live_funding =
@@ -710,7 +720,7 @@ void test_replay_recovery_matches_uninterrupted_runtime() {
   assert(live_funding.replies.empty());
   assert(live_funding.events.size() == 1);
   assert(live_funding.events[0].type == "FundingRateUpdated");
-  assert(live_funding.events[0].payload.at("engine_sequence") == "10");
+  assert(live_funding.events[0].payload.at("engine_sequence") == "12");
   assert_funding_rate_state(runtime_a.funding_rates().at(1), 10'000, 1'000'000);
 
   const auto live_settlement =
@@ -723,17 +733,17 @@ void test_replay_recovery_matches_uninterrupted_runtime() {
   assert(live_settlement.events[0]
              .payload.at("engine_sequence")
              .as_number()
-             ->text == "11");
+             ->text == "13");
   assert(live_settlement.events[1].type == "RiskStateUpdated");
   assert(live_settlement.events[1]
              .payload.at("engine_sequence")
              .as_number()
-             ->text == "12");
+             ->text == "14");
   assert(live_settlement.events[2].type == "RiskStateUpdated");
   assert(live_settlement.events[2]
              .payload.at("engine_sequence")
              .as_number()
-             ->text == "13");
+             ->text == "15");
 
   const auto live_post_resting =
       runtime_a.process(make_runtime_record(post_resting_order, 1205));
@@ -810,7 +820,7 @@ void test_replay_recovery_matches_uninterrupted_runtime() {
   assert_book_does_not_have_order(runtime_b, 9201);
   assert(runtime_a.market_sequences().peek(1) ==
          runtime_b.market_sequences().peek(1));
-  assert(runtime_a.market_sequences().peek(1) == 18);
+  assert(runtime_a.market_sequences().peek(1) == 20);
   assert_mark_price_state(runtime_b.mark_prices().at(1), 101, 100, 45'002);
   assert_funding_rate_state(runtime_b.funding_rates().at(1), 10'000, 1'000'000);
 
@@ -855,11 +865,11 @@ void test_replay_recovery_matches_uninterrupted_runtime() {
   assert(live_snapshot.risk_states.at(cex::runtime::PositionRiskKey{
       .user_id = 42,
       .market_id = 1,
-  }).equity == 90);
+  }).equity == 100);
   assert(live_snapshot.risk_states.at(cex::runtime::PositionRiskKey{
       .user_id = 43,
       .market_id = 1,
-  }).equity == 110);
+  }).equity == 100);
   assert(live_snapshot.processed_input_ids.size() == 7);
   assert(live_snapshot.processed_idempotency_keys.size() == 4);
 
@@ -946,9 +956,9 @@ void test_replay_recovery_matches_uninterrupted_runtime() {
   assert(next_live_a.replies.size() == 1);
   assert(next_live_a.events.size() == 2);
   assert(next_live_a.events[0].type == "OrderOpened");
-  assert(next_live_a.events[0].payload.at("engine_sequence") == "18");
+  assert(next_live_a.events[0].payload.at("engine_sequence") == "20");
   assert(next_live_a.events[1].type == "OrderBookDelta");
-  assert(next_live_a.events[1].payload.at("engine_sequence") == "19");
+  assert(next_live_a.events[1].payload.at("engine_sequence") == "21");
   assert_book_has_order(runtime_a, 9301);
   assert_book_has_order(runtime_b, 9301);
 }

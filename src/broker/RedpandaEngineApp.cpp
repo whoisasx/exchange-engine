@@ -107,9 +107,7 @@ EngineBrokerAppResult RedpandaEngineApp::consume(
 
   result.process_status = process_result.status;
 
-  ProducerBackedPublisher publisher(producer_);
-  runtime::EngineOutbox outbox(publisher);
-  result.publish_result = outbox.publish(process_result);
+  result.publish_result = publish(process_result);
   if (!result.publish_result.ok()) {
     result.status = EngineBrokerAppStatus::PublishFailed;
     result.error = result.publish_result.failures.front().error;
@@ -148,6 +146,13 @@ EngineBrokerAppResult RedpandaEngineApp::consume(
   result.status = EngineBrokerAppStatus::Processed;
   result.committed = true;
   return result;
+}
+
+runtime::EnginePublishResult RedpandaEngineApp::publish(
+    const runtime::EngineProcessResult& process_result) {
+  ProducerBackedPublisher publisher(producer_);
+  runtime::EngineOutbox outbox(publisher);
+  return outbox.publish(process_result);
 }
 
 bool RedpandaEngineApp::duplicate_source_is_safe(

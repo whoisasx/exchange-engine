@@ -105,27 +105,30 @@ namespace {
 }
 
 [[nodiscard]] std::string checkpoint_id_for(
-    const cex::broker::ConsumedRecord& source) {
+    const cex::checkpoint::CheckpointSourcePosition& source) {
   std::ostringstream output;
   output << "source-" << safe_checkpoint_topic(source.topic) << "-p"
          << std::setw(10) << std::setfill('0') << source.partition << "-o"
-         << std::setw(20) << std::setfill('0') << next_offset(source);
+         << std::setw(20) << std::setfill('0') << source.next_offset;
   return output.str();
 }
 
-std::optional<std::string> save_checkpoint_for_source(
-    const cex::broker::ConsumedRecord& source,
-    const cex::runtime::EngineRuntime& runtime,
-    cex::checkpoint::EngineCheckpointManager& checkpoint_manager,
-    cex::checkpoint::FileCheckpointStore& checkpoint_store) {
-  const cex::checkpoint::CheckpointSourcePosition source_position{
+[[nodiscard]] std::string checkpoint_id_for(
+    const cex::broker::ConsumedRecord& source) {
+  return checkpoint_id_for(cex::checkpoint::CheckpointSourcePosition{
       .topic = source.topic,
       .partition = source.partition,
       .next_offset = next_offset(source),
-  };
+  });
+}
 
+std::optional<std::string> save_checkpoint_for_source(
+    const cex::checkpoint::CheckpointSourcePosition& source_position,
+    const cex::runtime::EngineRuntime& runtime,
+    cex::checkpoint::EngineCheckpointManager& checkpoint_manager,
+    cex::checkpoint::FileCheckpointStore& checkpoint_store) {
   auto checkpoint = checkpoint_manager.create_checkpoint(
-      runtime, source_position, checkpoint_id_for(source));
+      runtime, source_position, checkpoint_id_for(source_position));
   const auto checkpoint_id = checkpoint.checkpoint_id;
   checkpoint_store.save(std::move(checkpoint));
 
@@ -133,6 +136,22 @@ std::optional<std::string> save_checkpoint_for_source(
             << source_position.topic << '[' << source_position.partition
             << "] next_offset=" << source_position.next_offset << '\n';
   return std::nullopt;
+}
+
+std::optional<std::string> save_checkpoint_for_source(
+    const cex::broker::ConsumedRecord& source,
+    const cex::runtime::EngineRuntime& runtime,
+    cex::checkpoint::EngineCheckpointManager& checkpoint_manager,
+    cex::checkpoint::FileCheckpointStore& checkpoint_store) {
+  return save_checkpoint_for_source(
+      cex::checkpoint::CheckpointSourcePosition{
+          .topic = source.topic,
+          .partition = source.partition,
+          .next_offset = next_offset(source),
+      },
+      runtime,
+      checkpoint_manager,
+      checkpoint_store);
 }
 
 void log_recovery_result(
@@ -192,6 +211,69 @@ void fail_if_recovery_incomplete(
     throw std::runtime_error(
         "startup recovery did not catch up before live polling");
   }
+}
+
+[[nodiscard]] cex::runtime::InboundEngineRecord startup_liquidation_source() {
+  return cex::runtime::InboundEngineRecord{
+      .topic = "engine.startup",
+      .partition = -1,
+      .offset = -1,
+      .key = std::string{"startup-automatic-liquidation"},
+      .raw_json = "",
+  };
+}
+
+[[nodiscard]] cex::checkpoint::CheckpointSourcePosition
+startup_checkpoint_position(const cex::recovery::RecoveryResult& result,
+                            std::string fallback_topic) {
+  if (result.source_position.has_value()) {
+    return cex::checkpoint::CheckpointSourcePosition{
+        .topic = result.source_position->topic,
+        .partition = result.source_position->partition,
+        .next_offset = result.next_offset,
+    };
+  }
+
+  return cex::checkpoint::CheckpointSourcePosition{
+      .topic = std::move(fallback_topic),
+      .partition = 0,
+      .next_offset = result.next_offset,
+  };
+}
+
+void run_startup_automatic_liquidation_scan(
+    cex::runtime::EngineRuntime& runtime,
+    cex::broker::RedpandaEngineApp& app,
+    const cex::recovery::RecoveryResult& recovery_result,
+    const std::string& fallback_input_topic,
+    cex::checkpoint::EngineCheckpointManager& checkpoint_manager,
+    cex::checkpoint::FileCheckpointStore& checkpoint_store) {
+  auto process_result =
+      runtime.evaluate_all_automatic_liquidations(startup_liquidation_source());
+  if (process_result.empty()) {
+    std::cerr << "startup automatic liquidation scan emitted no records\n";
+    return;
+  }
+
+  const auto publish_result = app.publish(process_result);
+  if (!publish_result.ok()) {
+    throw std::runtime_error("startup automatic liquidation publish failed: " +
+                             publish_result.failures.front().error);
+  }
+
+  const auto checkpoint_position =
+      startup_checkpoint_position(recovery_result, fallback_input_topic);
+  if (auto error = save_checkpoint_for_source(checkpoint_position,
+                                              runtime,
+                                              checkpoint_manager,
+                                              checkpoint_store);
+      error.has_value()) {
+    throw std::runtime_error(
+        "startup automatic liquidation checkpoint failed: " + *error);
+  }
+
+  std::cerr << "startup automatic liquidation scan published "
+            << publish_result.published << " records\n";
 }
 
 }  // namespace
@@ -258,6 +340,13 @@ int main(int argc, char* argv[]) {
                                             checkpoint_manager,
                                             checkpoint_store);
         });
+
+    run_startup_automatic_liquidation_scan(runtime,
+                                           app,
+                                           recovery_result,
+                                           config.input_topic,
+                                           checkpoint_manager,
+                                           checkpoint_store);
 
     std::uint64_t poll_count{0};
     while (!config.poll_loop_limit.has_value() ||

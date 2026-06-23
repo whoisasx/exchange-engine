@@ -229,6 +229,18 @@ void assert_json_string_field(const protocol::JsonValue& object,
   assert(*text == expected);
 }
 
+void assert_trade_settlement(const protocol::JsonValue& value,
+                             const std::string& expected_reservation_id,
+                             const std::string& expected_asset,
+                             const std::string& expected_amount) {
+  assert(value.as_object() != nullptr);
+  assert_json_string_field(value, "reservation_id", expected_reservation_id);
+  assert_json_string_field(value, "debit_asset", expected_asset);
+  assert_json_number_field(value, "debit_amount", expected_amount);
+  assert_json_string_field(value, "credit_asset", expected_asset);
+  assert_json_number_field(value, "credit_amount", expected_amount);
+}
+
 void assert_price_level_delta(const protocol::JsonValue& value,
                               const std::string& expected_price,
                               const std::string& expected_quantity) {
@@ -429,6 +441,56 @@ std::string place_order_json(const std::string& input_id,
     "reduce_only": false,
     "margin_asset": "USDC",
     "reserved_margin_amount": 100,
+    "leverage": 10
+  }
+})json";
+  return json.str();
+}
+
+std::string custom_place_order_json(const std::string& input_id,
+                                    const std::string& request_id,
+                                    const std::string& idempotency_key,
+                                    std::int64_t order_id,
+                                    const std::string& reservation_id,
+                                    std::int64_t user_id,
+                                    const std::string& side,
+                                    std::int64_t quantity,
+                                    std::int64_t price,
+                                    bool reduce_only,
+                                    std::int64_t reserved_margin_amount = 100) {
+  std::ostringstream json;
+  json << R"json({
+  "type": "PlaceOrder",
+  "payload": {
+    "input_id": ")json"
+       << input_id << R"json(",
+    "envelope": {
+      "request_id": ")json"
+       << request_id << R"json(",
+      "idempotency_key": ")json"
+       << idempotency_key << R"json(",
+      "user_id": )json"
+       << user_id << R"json(,
+      "reply_partition": 0
+    },
+    "reservation_id": ")json"
+       << reservation_id << R"json(",
+    "order_id": )json"
+       << order_id << R"json(,
+    "market_id": 1,
+    "market_name": "SOL-PERP",
+    "side": ")json"
+       << side << R"json(",
+    "order_type": "LIMIT",
+    "quantity": )json"
+       << quantity << R"json(,
+    "price": )json"
+       << price << R"json(,
+    "reduce_only": )json"
+       << (reduce_only ? "true" : "false") << R"json(,
+    "margin_asset": "USDC",
+    "reserved_margin_amount": )json"
+       << reserved_margin_amount << R"json(,
     "leverage": 10
   }
 })json";
@@ -1000,7 +1062,10 @@ void test_runtime_crossing_order_emits_trade() {
                         "taker_reservation_id",
                         "res_taker_001");
   assert(payload_array(trade_message, "fee_deltas").empty());
-  assert(payload_array(trade_message, "settlements").empty());
+  const auto& settlements = payload_array(trade_message, "settlements");
+  assert(settlements.size() == 2);
+  assert_trade_settlement(settlements[0], "res_place_001", "USDC", "100");
+  assert_trade_settlement(settlements[1], "res_taker_001", "USDC", "100");
 
   const auto& maker_position = result.events[1];
   assert(maker_position.payload.at("engine_sequence") == "4");
@@ -1090,6 +1155,148 @@ void test_runtime_crossing_order_emits_trade() {
   assert(runtime.metadata_store().empty());
 }
 
+void test_reduce_only_rejects_without_position() {
+  auto runtime = make_runtime();
+  const auto reduce_only = custom_place_order_json("input_reduce_no_pos",
+                                                   "req_reduce_no_pos",
+                                                   "idem-reduce-no-pos",
+                                                   9201,
+                                                   "res_reduce_no_pos",
+                                                   42,
+                                                   "SHORT",
+                                                   5,
+                                                   100,
+                                                   true,
+                                                   50);
+
+  const auto result = runtime.process(make_record(reduce_only, 1211));
+  assert(result.status == EngineProcessStatus::Processed);
+  assert(result.replies.size() == 1);
+  assert(result.replies[0].type == "OrderRejected");
+  assert(result.replies[0].payload.at("reason") == "reduce_only_no_position");
+  assert(payload_number_text(result.replies[0], "order_id") == "9201");
+  assert(result.events.size() == 1);
+  assert(result.events[0].type == "ReservationReleased");
+  assert(payload_number_text(result.events[0], "released_amount") == "50");
+  assert_book_does_not_have_order(runtime, 9201);
+  assert(runtime.metadata_store().empty());
+}
+
+void test_reduce_only_rejects_wrong_side() {
+  auto runtime = make_runtime();
+  open_opposite_positions(runtime);
+  const auto reduce_only = custom_place_order_json("input_reduce_wrong_side",
+                                                   "req_reduce_wrong_side",
+                                                   "idem-reduce-wrong-side",
+                                                   9202,
+                                                   "res_reduce_wrong_side",
+                                                   42,
+                                                   "LONG",
+                                                   5,
+                                                   100,
+                                                   true,
+                                                   50);
+
+  const auto result = runtime.process(make_record(reduce_only, 1212));
+  assert(result.status == EngineProcessStatus::Processed);
+  assert(result.replies.size() == 1);
+  assert(result.replies[0].type == "OrderRejected");
+  assert(result.replies[0].payload.at("reason") == "reduce_only_wrong_side");
+  assert(result.events.size() == 1);
+  assert(result.events[0].type == "ReservationReleased");
+  assert_book_does_not_have_order(runtime, 9202);
+  assert_position_state(runtime, 42, 10, 100, 100);
+}
+
+void test_reduce_only_exact_close_does_not_rest() {
+  auto runtime = make_runtime();
+  open_opposite_positions(runtime);
+  const auto bid = custom_place_order_json("input_reduce_exact_bid",
+                                           "req_reduce_exact_bid",
+                                           "idem-reduce-exact-bid",
+                                           9203,
+                                           "res_reduce_exact_bid",
+                                           44,
+                                           "LONG",
+                                           10,
+                                           100,
+                                           false);
+  const auto bid_result = runtime.process(make_record(bid, 1213));
+  assert(bid_result.status == EngineProcessStatus::Processed);
+  assert_book_has_order(runtime, 9203);
+
+  const auto reduce_only = custom_place_order_json("input_reduce_exact",
+                                                   "req_reduce_exact",
+                                                   "idem-reduce-exact",
+                                                   9204,
+                                                   "res_reduce_exact",
+                                                   42,
+                                                   "SHORT",
+                                                   10,
+                                                   100,
+                                                   true,
+                                                   100);
+  const auto result = runtime.process(make_record(reduce_only, 1214));
+
+  assert(result.status == EngineProcessStatus::Processed);
+  assert(result.replies.size() == 1);
+  assert(result.replies[0].type == "OrderAccepted");
+  assert(find_record(result.events, "OrderOpened") == nullptr);
+  assert(find_record(result.events, "OrderExpired") == nullptr);
+  const auto* trade = find_record(result.events, "TradeExecuted");
+  assert(trade != nullptr);
+  assert(payload_number_text(*trade, "quantity") == "10");
+  assert_book_does_not_have_order(runtime, 9204);
+  assert(runtime.metadata_store().find(9204) == nullptr);
+  assert_position_state(runtime, 42, 0, 0, 0);
+}
+
+void test_reduce_only_oversized_close_is_capped_and_excess_expires() {
+  auto runtime = make_runtime();
+  open_opposite_positions(runtime);
+  const auto bid = custom_place_order_json("input_reduce_over_bid",
+                                           "req_reduce_over_bid",
+                                           "idem-reduce-over-bid",
+                                           9205,
+                                           "res_reduce_over_bid",
+                                           44,
+                                           "LONG",
+                                           10,
+                                           100,
+                                           false);
+  (void)runtime.process(make_record(bid, 1215));
+  assert_book_has_order(runtime, 9205);
+
+  const auto reduce_only = custom_place_order_json("input_reduce_over",
+                                                   "req_reduce_over",
+                                                   "idem-reduce-over",
+                                                   9206,
+                                                   "res_reduce_over",
+                                                   42,
+                                                   "SHORT",
+                                                   15,
+                                                   100,
+                                                   true,
+                                                   150);
+  const auto result = runtime.process(make_record(reduce_only, 1216));
+
+  assert(result.status == EngineProcessStatus::Processed);
+  assert(result.replies.size() == 1);
+  assert(result.replies[0].type == "OrderAccepted");
+  assert(find_record(result.events, "OrderOpened") == nullptr);
+  const auto* trade = find_record(result.events, "TradeExecuted");
+  assert(trade != nullptr);
+  assert(payload_number_text(*trade, "quantity") == "10");
+  const auto* expired = find_record(result.events, "OrderExpired");
+  assert(expired != nullptr);
+  assert(payload_number_text(*expired, "expired_quantity") == "5");
+  assert(payload_number_text(*expired, "released_amount") == "50");
+  assert(expired->payload.at("reason") == "REDUCE_ONLY_REMAINDER");
+  assert_book_does_not_have_order(runtime, 9206);
+  assert(runtime.metadata_store().find(9206) == nullptr);
+  assert_position_state(runtime, 42, 0, 0, 0);
+}
+
 void test_mark_price_affects_fill_risk_state() {
   auto runtime = make_runtime();
   const auto mark = R"json({
@@ -1162,6 +1369,7 @@ void test_runtime_cancel_order() {
   assert(cancelled->payload.at("order_id") == "9001");
   assert(cancelled->payload.at("reservation_id") == "res_place_001");
   assert(cancelled->payload.at("market_id") == "1");
+  assert(payload_number_text(*cancelled, "released_amount") == "100");
   assert(runtime.metadata_store().empty());
 }
 
@@ -1674,7 +1882,7 @@ void test_runtime_liquidation_accepted_flattens_state_and_emits_lifecycle() {
       runtime.process(make_record(liquidation_json(), 1753));
   assert(result.status == EngineProcessStatus::Processed);
   assert(result.replies.size() == 1);
-  assert(result.events.size() == 9);
+  assert(result.events.size() == 10);
   assert(result.replies[0].type == "LiquidationAccepted");
   assert(result.replies[0].payload.at("request_id") == "req_liq_001");
   assert(result.replies[0].payload.at("source_input_id") == "input_liq_001");
@@ -1705,7 +1913,10 @@ void test_runtime_liquidation_accepted_flattens_state_and_emits_lifecycle() {
   assert(result.events[1].payload.at("maker_reservation_id") ==
          "res_liq_ask_full");
   const auto trade_message = parse_serialized_output(result.events[1]);
-  assert(payload_array(trade_message, "fee_deltas").size() == 1);
+  const auto& fee_deltas = payload_array(trade_message, "fee_deltas");
+  assert(fee_deltas.size() == 1);
+  assert_json_number_field(fee_deltas[0], "amount", "4");
+  assert_json_string_field(fee_deltas[0], "fee_type", "LIQUIDATION");
   assert(payload_array(trade_message, "settlements").size() == 1);
 
   assert(result.events[2].type == "LiquidationExecuted");
@@ -1719,31 +1930,45 @@ void test_runtime_liquidation_accepted_flattens_state_and_emits_lifecycle() {
   assert(result.events[3].payload.at("side") == "SHORT");
   assert(result.events[3].payload.at("reason") == "LIQUIDATION");
 
-  assert(result.events[5].type == "PositionChanged");
+  assert(result.events[5].type == "AccountDelta");
   assert(payload_number_text(result.events[5], "engine_sequence") == "17");
+  const auto liquidation_order_id =
+      payload_number_text(result.replies[0], "order_id");
+  assert(result.events[5].payload.at("account_delta_id") ==
+         "acct_fill_2_43_" + liquidation_order_id);
   assert(payload_number_text(result.events[5], "user_id") == "43");
-  assert(result.events[5].payload.at("side") == "FLAT");
-  assert(payload_number_text(result.events[5], "signed_quantity") == "0");
-  assert(payload_number_text(result.events[5], "quantity") == "0");
-  assert(payload_number_text(result.events[5], "isolated_margin") == "0");
-  assert(result.events[5].payload.at("reason") == "LIQUIDATION");
+  assert(result.events[5].payload.at("asset") == "USDC");
+  assert(payload_number_text(result.events[5], "total_delta") == "50");
+  assert(payload_number_text(result.events[5], "locked_delta") == "-100");
+  assert(result.events[5].payload.at("reason") == "LIQUIDATION_SETTLEMENT");
+  assert(result.events[5].payload.at("reference_id") == "liq_001");
 
-  assert(result.events[6].type == "RiskStateUpdated");
+  assert(result.events[6].type == "PositionChanged");
   assert(payload_number_text(result.events[6], "engine_sequence") == "18");
-  assert(result.events[6].payload.at("status") == "FLAT");
+  assert(payload_number_text(result.events[6], "user_id") == "43");
+  assert(result.events[6].payload.at("side") == "FLAT");
+  assert(payload_number_text(result.events[6], "signed_quantity") == "0");
   assert(payload_number_text(result.events[6], "quantity") == "0");
-  assert(payload_number_text(result.events[6], "equity") == "0");
-  assert(payload_number_text(result.events[6], "maintenance_margin") == "0");
+  assert(payload_number_text(result.events[6], "isolated_margin") == "0");
+  assert(payload_number_text(result.events[6], "realized_pnl") == "50");
+  assert(result.events[6].payload.at("reason") == "LIQUIDATION");
 
-  assert(result.events[7].type == "OrderBookDelta");
+  assert(result.events[7].type == "RiskStateUpdated");
   assert(payload_number_text(result.events[7], "engine_sequence") == "19");
+  assert(result.events[7].payload.at("status") == "FLAT");
+  assert(payload_number_text(result.events[7], "quantity") == "0");
+  assert(payload_number_text(result.events[7], "equity") == "0");
+  assert(payload_number_text(result.events[7], "maintenance_margin") == "0");
 
-  assert(result.events[8].type == "LiquidationCompleted");
+  assert(result.events[8].type == "OrderBookDelta");
   assert(payload_number_text(result.events[8], "engine_sequence") == "20");
-  assert(result.events[8].payload.at("final_status") == "FLAT");
-  assert(payload_number_text(result.events[8], "remaining_quantity") == "0");
-  assert(payload_number_text(result.events[8], "insurance_fund_delta") == "0");
-  assert(payload_number_text(result.events[8], "bad_debt") == "0");
+
+  assert(result.events[9].type == "LiquidationCompleted");
+  assert(payload_number_text(result.events[9], "engine_sequence") == "21");
+  assert(result.events[9].payload.at("final_status") == "FLAT");
+  assert(payload_number_text(result.events[9], "remaining_quantity") == "0");
+  assert(payload_number_text(result.events[9], "insurance_fund_delta") == "0");
+  assert(payload_number_text(result.events[9], "bad_debt") == "0");
   assert(find_record(result.events, "AdlExecuted") == nullptr);
 
   const auto key = PositionRiskKey{.user_id = 43, .market_id = 1};
@@ -1751,7 +1976,7 @@ void test_runtime_liquidation_accepted_flattens_state_and_emits_lifecycle() {
   assert(runtime.positions().at(key).isolated_margin == 0);
   assert(runtime.risk_states().at(key).status == "FLAT");
   assert(runtime.risk_states().at(key).equity == 0);
-  assert(runtime.market_sequences().peek(1) == 21);
+  assert(runtime.market_sequences().peek(1) == 22);
   assert(runtime.metadata_store().find(9201) == nullptr);
 }
 
@@ -1769,8 +1994,8 @@ void test_liquidation_duplicate_input_and_idempotency_do_not_reapply() {
   const auto first =
       runtime.process(make_record(liquidation_json(), 1760));
   assert(first.status == EngineProcessStatus::Processed);
-  assert(first.events.size() == 9);
-  assert(runtime.market_sequences().peek(1) == 21);
+  assert(first.events.size() == 10);
+  assert(runtime.market_sequences().peek(1) == 22);
 
   const auto same_input =
       runtime.process(make_record(liquidation_json(), 1761));
@@ -1779,7 +2004,7 @@ void test_liquidation_duplicate_input_and_idempotency_do_not_reapply() {
                           "input_liq_001",
                           1760,
                           "input_liq_001");
-  assert(runtime.market_sequences().peek(1) == 21);
+  assert(runtime.market_sequences().peek(1) == 22);
 
   const auto same_idempotency = runtime.process(
       make_record(liquidation_json("input_liq_002",
@@ -1823,7 +2048,8 @@ void test_runtime_liquidation_residual_book_fill_uses_adl() {
   assert(result.status == EngineProcessStatus::Processed);
   assert(result.replies.size() == 1);
   assert(result.replies[0].type == "LiquidationAccepted");
-  assert(result.events.size() == 15);
+  assert(result.events.size() == 18);
+  assert(count_records(result.events, "AccountDelta") == 3);
   const auto* trade = find_record(result.events, "TradeExecuted");
   assert(trade != nullptr);
   assert(payload_number_text(*trade, "quantity") == "4");
@@ -1869,7 +2095,8 @@ void test_runtime_liquidation_full_adl_without_book_liquidity() {
   assert(result.status == EngineProcessStatus::Processed);
   assert(result.replies.size() == 1);
   assert(result.replies[0].type == "LiquidationAccepted");
-  assert(result.events.size() == 8);
+  assert(result.events.size() == 10);
+  assert(count_records(result.events, "AccountDelta") == 2);
   assert(result.events[0].type == "LiquidationStarted");
   assert(find_record(result.events, "LiquidationExecuted") == nullptr);
   assert(find_record(result.events, "OrderBookDelta") == nullptr);
@@ -1901,7 +2128,7 @@ void test_runtime_liquidation_full_adl_without_book_liquidity() {
 
   assert_position_state(runtime, 42, 0, 0, 0);
   assert_position_state(runtime, 43, 0, 0, 0);
-  assert(runtime.market_sequences().peek(1) == 18);
+  assert(runtime.market_sequences().peek(1) == 20);
 }
 
 void test_runtime_liquidation_ignores_non_profitable_adl_candidates() {
@@ -1961,7 +2188,8 @@ void test_runtime_liquidation_partial_adl_when_opposing_exposure_shortfall() {
   assert(result.status == EngineProcessStatus::Processed);
   assert(result.replies.size() == 1);
   assert(result.replies[0].type == "LiquidationAccepted");
-  assert(result.events.size() == 8);
+  assert(result.events.size() == 10);
+  assert(count_records(result.events, "AccountDelta") == 2);
 
   const auto* adl = find_record(result.events, "AdlExecuted");
   assert(adl != nullptr);
@@ -2073,7 +2301,7 @@ void test_replay_silent_liquidation_flattens_state_without_outputs() {
       make_record(liquidation_json(), 1770));
   assert(result.status == EngineProcessStatus::Processed);
   assert(result.empty());
-  assert(runtime.market_sequences().peek(1) == 21);
+  assert(runtime.market_sequences().peek(1) == 22);
   const auto key = PositionRiskKey{.user_id = 43, .market_id = 1};
   assert(runtime.positions().at(key).signed_quantity == 0);
   assert(runtime.risk_states().at(key).status == "FLAT");
@@ -2087,7 +2315,7 @@ void test_replay_silent_liquidation_flattens_state_without_outputs() {
                           "input_liq_001",
                           1770,
                           "input_liq_001");
-  assert(restored.market_sequences().peek(1) == 21);
+  assert(restored.market_sequences().peek(1) == 22);
   assert(restored.risk_states().at(key).status == "FLAT");
 }
 
@@ -2329,7 +2557,7 @@ void test_same_order_id_different_idempotency_reaches_core() {
   assert(result.status == EngineProcessStatus::Processed);
   assert(result.duplicate == std::nullopt);
   assert(result.replies.size() == 1);
-  assert(result.events.empty());
+  assert(result.events.size() == 1);
 
   const auto* rejected = find_record(result.replies, "OrderRejected");
   assert(rejected != nullptr);
@@ -2338,6 +2566,15 @@ void test_same_order_id_different_idempotency_reaches_core() {
   assert(rejected->payload.at("source_input_offset") == "1322");
   assert(rejected->payload.at("order_id") == "9104");
   assert(rejected->payload.at("reason") == "duplicate_order");
+
+  const auto* released = find_record(result.events, "ReservationReleased");
+  assert(released != nullptr);
+  assert(released->payload.at("reservation_id") == "res_same_order_002");
+  assert(payload_number_text(*released, "user_id") == "42");
+  assert(released->payload.at("asset") == "USDC");
+  assert(payload_number_text(*released, "released_amount") == "100");
+  assert(released->payload.at("reason") ==
+         "ORDER_REJECTED_AFTER_RESERVATION");
 }
 
 void test_cancel_duplicate_input_id_and_idempotency_are_silent() {
@@ -2499,6 +2736,10 @@ int main() {
     test_funding_settlement_tick_validation();
     test_runtime_resting_limit_order();
     test_runtime_crossing_order_emits_trade();
+    test_reduce_only_rejects_without_position();
+    test_reduce_only_rejects_wrong_side();
+    test_reduce_only_exact_close_does_not_rest();
+    test_reduce_only_oversized_close_is_capped_and_excess_expires();
     test_mark_price_affects_fill_risk_state();
     test_runtime_cancel_order();
     test_runtime_mark_price_updated_emits_event_without_reply();

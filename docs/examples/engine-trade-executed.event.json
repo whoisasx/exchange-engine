@@ -17,28 +17,21 @@
     "maker_reservation_id": "res_maker_001",
     "taker_reservation_id": "res_taker_001",
     "execution_reason": "TRADE",
-    "fee_deltas": [
-      {
-        "user_id": 43,
-        "asset": "USDC",
-        "amount": 1,
-        "fee_type": "TAKER"
-      }
-    ],
+    "fee_deltas": [],
     "settlements": [
+      {
+        "reservation_id": "res_maker_001",
+        "debit_asset": "USDC",
+        "debit_amount": 100,
+        "credit_asset": "USDC",
+        "credit_amount": 100
+      },
       {
         "reservation_id": "res_taker_001",
         "debit_asset": "USDC",
-        "debit_amount": 1000,
-        "credit_asset": "SOL",
-        "credit_amount": 10
-      },
-      {
-        "reservation_id": "res_maker_001",
-        "debit_asset": "SOL",
-        "debit_amount": 10,
+        "debit_amount": 100,
         "credit_asset": "USDC",
-        "credit_amount": 1000
+        "credit_amount": 100
       }
     ]
   }
