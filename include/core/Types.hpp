@@ -2,7 +2,7 @@
 #include<cstdint>
 
 using SymbolId=uint32_t;
-using UserId=uint32_t;
+using UserId=uint64_t;
 using OrderId=uint64_t;
 using ClientOrderId=uint64_t; // id sent by the rust api client
 using CommandId=uint64_t; // tracking the request/instruction

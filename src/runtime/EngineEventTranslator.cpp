@@ -397,7 +397,7 @@ struct FillAccountEffect {
 }
 
 [[nodiscard]] bool has_account_delta(const FillAccountEffect& effect) {
-  return effect.realized_pnl != 0 || effect.released_margin != 0;
+  return effect.realized_pnl != 0;
 }
 
 [[nodiscard]] const char* fill_reason_text(
@@ -457,7 +457,7 @@ struct FillAccountEffect {
       {"user_id", number_value(metadata.user_id)},
       {"asset", account_delta_asset_for(previous_position, metadata)},
       {"total_delta", number_value(effect.realized_pnl)},
-      {"locked_delta", number_value(-effect.released_margin)},
+      {"locked_delta", number_value(0)},
       {"reason", account_delta_reason_text(context)},
       {"reference_id", account_delta_reference_id(trade, context)},
   };

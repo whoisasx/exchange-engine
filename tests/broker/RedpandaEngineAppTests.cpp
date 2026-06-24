@@ -477,6 +477,56 @@ void test_wrong_input_topic_is_rejected_without_commit() {
   assert(result.publish_result.attempted == 0);
   assert(producer.records.empty());
   assert(committer.commits.empty());
+  assert(result.error == "expected input topic engine.input, received " +
+                             std::string(EngineEventsTopic));
+}
+
+void test_configured_input_topic_is_processed_and_committed() {
+  const std::string configured_topic = "engine.input.blue";
+  const auto place_order = place_order_fixture();
+  ConsumedRecord record = make_input_record(451, place_order);
+  record.topic = configured_topic;
+
+  FakeConsumer consumer({record});
+  FakeProducer producer;
+  FakeCommitter committer;
+  auto runtime = make_runtime();
+  RedpandaEngineApp app(
+      consumer, producer, committer, runtime, configured_topic);
+
+  const auto result = app.poll_once();
+
+  assert(result.status == EngineBrokerAppStatus::Processed);
+  assert(result.committed);
+  assert(result.publish_result.ok());
+  assert(producer.records.size() == 3);
+  assert(committer.commits.size() == 1);
+  assert(committer.commits[0].topic == configured_topic);
+  assert(committer.commits[0].partition == 0);
+  assert(committer.commits[0].offset == 451);
+}
+
+void test_configured_input_topic_rejects_default_topic_without_commit() {
+  const std::string configured_topic = "engine.input.blue";
+  const auto place_order = place_order_fixture();
+  ConsumedRecord record = make_input_record(452, place_order);
+
+  FakeConsumer consumer({record});
+  FakeProducer producer;
+  FakeCommitter committer;
+  auto runtime = make_runtime();
+  RedpandaEngineApp app(
+      consumer, producer, committer, runtime, configured_topic);
+
+  const auto result = app.poll_once();
+
+  assert(result.status == EngineBrokerAppStatus::RejectedInputTopic);
+  assert(!result.committed);
+  assert(result.publish_result.attempted == 0);
+  assert(producer.records.empty());
+  assert(committer.commits.empty());
+  assert(result.error == "expected input topic engine.input.blue, received " +
+                             std::string(EngineInputTopic));
 }
 
 }  // namespace
@@ -494,6 +544,8 @@ int main() {
     test_duplicate_no_output_result_commits_without_publishes();
     test_rejected_no_output_result_commits_without_publishes();
     test_wrong_input_topic_is_rejected_without_commit();
+    test_configured_input_topic_is_processed_and_committed();
+    test_configured_input_topic_rejects_default_topic_without_commit();
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';
     return EXIT_FAILURE;

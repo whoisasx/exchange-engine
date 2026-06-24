@@ -1939,7 +1939,7 @@ void test_runtime_liquidation_accepted_flattens_state_and_emits_lifecycle() {
   assert(payload_number_text(result.events[5], "user_id") == "43");
   assert(result.events[5].payload.at("asset") == "USDC");
   assert(payload_number_text(result.events[5], "total_delta") == "50");
-  assert(payload_number_text(result.events[5], "locked_delta") == "-100");
+  assert(payload_number_text(result.events[5], "locked_delta") == "0");
   assert(result.events[5].payload.at("reason") == "LIQUIDATION_SETTLEMENT");
   assert(result.events[5].payload.at("reference_id") == "liq_001");
 

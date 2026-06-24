@@ -1,6 +1,7 @@
 #include "adapter/EngineAdapter.hpp"
 
 #include <cassert>
+#include <cstdint>
 #include <stdexcept>
 
 using namespace cex::adapter;
@@ -107,6 +108,17 @@ void test_cancel_order_mapping() {
   assert(command.receivedSequence == 78);
 }
 
+void test_large_exchange_user_id_maps_to_core() {
+  constexpr std::int64_t user_id = 475'230'507'652'431'248LL;
+  auto input = make_place_order();
+  input.envelope.user_id = user_id;
+
+  const auto mapped = map_place_order_to_core(input, 79);
+
+  assert(mapped.command.placeOrder->userId == static_cast<UserId>(user_id));
+  assert(mapped.metadata_to_record->user_id == user_id);
+}
+
 void test_market_order_allows_zero_price() {
   auto input = make_place_order();
   input.order_id = 9002;
@@ -168,6 +180,7 @@ void test_validation_rejects_bad_boundary_inputs() {
 int main() {
   test_place_order_mapping_records_metadata();
   test_cancel_order_mapping();
+  test_large_exchange_user_id_maps_to_core();
   test_market_order_allows_zero_price();
   test_public_sequences_are_per_market();
   test_validation_rejects_bad_boundary_inputs();

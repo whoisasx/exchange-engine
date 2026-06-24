@@ -2,6 +2,7 @@
 
 #include <exception>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -60,11 +61,29 @@ RedpandaEngineApp::RedpandaEngineApp(IEngineInputConsumer& consumer,
                                      IEngineOffsetCommitter& committer,
                                      runtime::EngineRuntime& runtime,
                                      EnginePreCommitHook pre_commit_hook)
+    : RedpandaEngineApp(consumer,
+                        producer,
+                        committer,
+                        runtime,
+                        EngineInputTopic,
+                        std::move(pre_commit_hook)) {}
+
+RedpandaEngineApp::RedpandaEngineApp(IEngineInputConsumer& consumer,
+                                     IEngineRecordProducer& producer,
+                                     IEngineOffsetCommitter& committer,
+                                     runtime::EngineRuntime& runtime,
+                                     std::string expected_input_topic,
+                                     EnginePreCommitHook pre_commit_hook)
     : consumer_(consumer),
       producer_(producer),
       committer_(committer),
       runtime_(runtime),
-      pre_commit_hook_(std::move(pre_commit_hook)) {}
+      expected_input_topic_(std::move(expected_input_topic)),
+      pre_commit_hook_(std::move(pre_commit_hook)) {
+  if (expected_input_topic_.empty()) {
+    throw std::invalid_argument("engine input topic must not be empty");
+  }
+}
 
 EngineBrokerAppResult RedpandaEngineApp::poll_once() {
   auto record = consumer_.poll();
@@ -83,10 +102,10 @@ EngineBrokerAppResult RedpandaEngineApp::consume(
       .source = record,
   };
 
-  if (record.topic != EngineInputTopic) {
+  if (record.topic != expected_input_topic_) {
     result.status = EngineBrokerAppStatus::RejectedInputTopic;
-    result.error = "expected input topic engine.input, received " +
-                   record.topic;
+    result.error = "expected input topic " + expected_input_topic_ +
+                   ", received " + record.topic;
     return result;
   }
 

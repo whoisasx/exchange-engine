@@ -154,6 +154,12 @@ class RedpandaEngineApp {
                     IEngineOffsetCommitter& committer,
                     runtime::EngineRuntime& runtime,
                     EnginePreCommitHook pre_commit_hook = {});
+  RedpandaEngineApp(IEngineInputConsumer& consumer,
+                    IEngineRecordProducer& producer,
+                    IEngineOffsetCommitter& committer,
+                    runtime::EngineRuntime& runtime,
+                    std::string expected_input_topic,
+                    EnginePreCommitHook pre_commit_hook = {});
 
   [[nodiscard]] EngineBrokerAppResult poll_once();
   [[nodiscard]] EngineBrokerAppResult consume(const ConsumedRecord& record);
@@ -169,6 +175,7 @@ class RedpandaEngineApp {
   IEngineRecordProducer& producer_;
   IEngineOffsetCommitter& committer_;
   runtime::EngineRuntime& runtime_;
+  std::string expected_input_topic_;
   EnginePreCommitHook pre_commit_hook_;
   std::vector<OffsetCommitRequest> committed_offsets_;
 };

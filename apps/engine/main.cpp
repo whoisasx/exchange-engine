@@ -333,6 +333,7 @@ int main(int argc, char* argv[]) {
         producer,
         consumer,
         runtime,
+        config.input_topic,
         [&](const cex::broker::ConsumedRecord& source,
             const cex::runtime::EngineRuntime& checkpoint_runtime) {
           return save_checkpoint_for_source(source,
