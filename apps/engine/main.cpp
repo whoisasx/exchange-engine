@@ -1,4 +1,4 @@
-#include "apps/engine/EngineAppConfig.hpp"
+#include "EngineAppConfig.hpp"
 #include "broker/RedpandaEngineApp.hpp"
 #include "broker/rdkafka/RdKafkaEngineBroker.hpp"
 #include "checkpoint/EngineCheckpointManager.hpp"

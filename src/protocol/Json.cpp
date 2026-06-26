@@ -25,20 +25,8 @@ bool JsonValue::is_null() const noexcept {
   return std::holds_alternative<std::nullptr_t>(storage_);
 }
 
-bool JsonValue::is_bool() const noexcept {
-  return std::holds_alternative<bool>(storage_);
-}
-
-bool JsonValue::is_number() const noexcept {
-  return std::holds_alternative<JsonNumber>(storage_);
-}
-
 bool JsonValue::is_string() const noexcept {
   return std::holds_alternative<std::string>(storage_);
-}
-
-bool JsonValue::is_array() const noexcept {
-  return std::holds_alternative<Array>(storage_);
 }
 
 bool JsonValue::is_object() const noexcept {
@@ -79,16 +67,8 @@ const JsonValue* JsonValue::find(std::string_view key) const {
   return &found->second;
 }
 
-const JsonValue::Storage& JsonValue::storage() const noexcept {
-  return storage_;
-}
-
-JsonParseError::JsonParseError(std::size_t offset, std::string message)
-    : std::runtime_error(std::move(message)), offset_(offset) {}
-
-std::size_t JsonParseError::offset() const noexcept {
-  return offset_;
-}
+JsonParseError::JsonParseError(std::size_t, std::string message)
+    : std::runtime_error(std::move(message)) {}
 
 namespace {
 

@@ -20,10 +20,7 @@ struct PriceLevel{
   }
 
   void push_back(Order*);
-  Order* pop_front();
 
   void increase_total(Quantity quantity);
   void decrease_total(Quantity quantity);
-
-  void clear();
 };

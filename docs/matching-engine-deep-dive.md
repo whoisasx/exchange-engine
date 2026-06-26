@@ -6,10 +6,8 @@ in-memory matching core should work, especially the ring-buffer price ladder.
 
 ## Current Direction
 
-The engine implementation target is C++ only.
-
-Rust files under `docs/reference/` are reference material for schema shape and
-fixtures. They are not runtime code.
+The engine implementation target is C++ only. The public stream contract and
+fixtures live in `docs/engine-contract.md` and `docs/examples/`.
 
 The engine is split into layers:
 
@@ -199,20 +197,11 @@ resting `Order`, so cancellation can unlink it without scanning the book.
 
 ## Ring Recentering
 
-The current implementation only recenters an empty ring. That is intentional for
-the current safe implementation stage.
+The current implementation does not expose active recentering. Prices outside
+the active ring window go to `FarPriceMap`.
 
-```text
-if ring has active levels:
-  do not recenter
-else:
-  choose new baseTick around referenceTick
-  reset headIndex
-  clear slots and bitmap
-```
-
-Moving a non-empty ring requires preserving price levels and order pointers. Do
-not add that until tests cover:
+Moving or recentering a non-empty ring requires preserving price levels and
+order pointers. Do not add that until tests cover:
 
 - active level relocation
 - cached best refresh
@@ -270,15 +259,17 @@ Do not push these into `OrderBook`, `SideBook`, `PriceLevel`, or
 
 Those belong to protocol, adapter, runtime, or downstream service layers.
 
-## Next Implementation Step
+## Current Runtime Path
 
-The next useful engine step is an in-process C++ runtime:
+The live path is:
 
-1. Parse typed `EngineInput` JSON.
-2. Validate `PlaceOrder` / `CancelOrder` fields.
-3. Map to adapter DTOs.
-4. Call `EngineCore`.
-5. Convert internal core events into protocol-shaped replies/events.
-6. Assert output against fixtures or focused expected messages.
+```text
+engine.input JSON
+  -> protocol parser
+  -> EngineRuntime
+  -> EngineCore / OrderBook
+  -> EngineOutputSerializer
+  -> engine.replies + engine.events
+```
 
-Only after that should Redpanda I/O be wired in.
+`engine_app` wires that runtime to Redpanda and checkpoint recovery.

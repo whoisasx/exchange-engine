@@ -31,23 +31,6 @@ target_include_directories(core_engine
     ${CMAKE_CURRENT_SOURCE_DIR}/include/core
 )
 
-add_library(core_services
-  src/services/FakeEngineSmoke.cpp
-  src/services/Ledger.cpp
-  src/services/OrderbookProjector.cpp
-  src/services/Timeseries.cpp
-  src/services/WebsocketFanout.cpp
-)
-add_library(cex::services ALIAS core_services)
-
-target_compile_features(core_services PUBLIC cxx_std_20)
-
-target_include_directories(core_services
-  PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
-)
-
 add_library(engine_adapter
   src/adapter/EngineAdapter.cpp
 )
@@ -107,7 +90,6 @@ target_link_libraries(engine_runtime
 add_library(engine_checkpoint
   src/checkpoint/EngineCheckpointManager.cpp
   src/checkpoint/file/FileCheckpointStore.cpp
-  src/checkpoint/InMemoryCheckpointStore.cpp
 )
 add_library(cex::engine_checkpoint ALIAS engine_checkpoint)
 
@@ -162,7 +144,7 @@ target_link_libraries(engine_recovery
 )
 
 add_library(engine_app_config
-  src/apps/engine/EngineAppConfig.cpp
+  apps/engine/EngineAppConfig.cpp
 )
 add_library(cex::engine_app_config ALIAS engine_app_config)
 
@@ -170,6 +152,7 @@ target_compile_features(engine_app_config PUBLIC cxx_std_20)
 
 target_include_directories(engine_app_config
   PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/apps/engine>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
@@ -424,14 +407,4 @@ if(BUILD_TESTING)
 
   add_test(NAME engine_app_config_tests COMMAND engine_app_config_tests)
 
-  add_executable(service_contract_tests
-    tests/services/ServiceContractsTest.cpp
-  )
-
-  target_link_libraries(service_contract_tests
-    PRIVATE
-      cex::services
-  )
-
-  add_test(NAME service_contract_tests COMMAND service_contract_tests)
 endif()

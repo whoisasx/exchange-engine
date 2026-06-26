@@ -1,6 +1,8 @@
 # Engine System Plan
 
-This plan describes the intended engine flow before the external C++ engine is built. The Rust workspace keeps the API, wallet, projector, websocket, ledger, timeseries, and contract fixtures. The engine owns matching and market risk.
+This plan describes the intended exchange engine flow. The Rust workspace keeps
+the API, wallet, projector, websocket, ledger, timeseries, and contract
+fixtures. The C++ engine owns matching and market risk.
 
 ## Decisions
 

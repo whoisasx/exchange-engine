@@ -1,17 +1,14 @@
 # Engine Context Bundle
 
-Start with `engine-system-plan.md`, then read `engine-contract.md`.
+Start with `engine-contract.md`, then read `engine-system-plan.md` when you
+need the broader service flow.
 
-Use `examples/` as the JSON conformance fixtures for C++ serializers and parsers.
-The Rust reference files are copied under `reference/` with their original repo paths:
-
-- `reference/crates/protocol/src/engine.rs`
-- `reference/crates/protocol/src/wallet.rs`
-- `reference/apps/fake-engine/src/engine.rs`
+Use `examples/` as the JSON conformance fixtures for C++ serializers and
+parsers. `matching-engine-deep-dive.md` describes the in-memory matching core
+and ring-buffer price ladder.
 
 The remaining docs describe downstream consumer expectations:
 
-- `fake-engine-smoke.md`
 - `orderbook.md`
 - `ledger.md`
 - `wallet-events.md`

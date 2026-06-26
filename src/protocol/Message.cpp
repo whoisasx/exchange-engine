@@ -49,16 +49,4 @@ std::optional<MessageClass> classify_engine_fixture_path(
   return std::nullopt;
 }
 
-std::string_view to_string(MessageClass message_class) noexcept {
-  switch (message_class) {
-    case MessageClass::Input:
-      return "input";
-    case MessageClass::Reply:
-      return "reply";
-    case MessageClass::Event:
-      return "event";
-  }
-  return "unknown";
-}
-
 }  // namespace protocol

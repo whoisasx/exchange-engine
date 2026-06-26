@@ -3,7 +3,6 @@
 #include<cstdint>
 #include<limits>
 #include<compare>
-#include<string>
 #include<string_view>
 
 class Price{
@@ -85,29 +84,4 @@ public:
 };
 
 
-class Notional{
-  int64_t raw_value;
-  explicit constexpr Notional(uint64_t value): raw_value(value){}
-public:
-  static constexpr Notional from_raw(uint64_t value){
-    return Notional(value);
-  }
-
-  static constexpr Notional from_price_quantity(Price price, Quantity quantity){
-
-    //add a check value<=uint64_t maxvalue
-    const auto value=static_cast<unsigned __int128>(price.ticks())*static_cast<unsigned __int128>(quantity.lots());
-
-    return Notional(static_cast<uint64_t>(value));
-  }
-
-  [[nodiscard]] constexpr int64_t raw() const {
-    return raw_value;
-  }
-};
-
 Price price(std::string_view value, int scale);
-std::string price_to_string(Price price, int scale);
-
-Quantity quantity_from_decimal_string(std::string_view value, int scale);
-std::string quantity_to_string(Quantity quantity, int scale);

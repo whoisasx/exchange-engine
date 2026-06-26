@@ -1,9 +1,7 @@
 #include"FixedPoint.hpp"
 
-#include <algorithm>
 #include <limits>
 #include <stdexcept>
-#include<string>
 #include<string_view>
 
 namespace {
@@ -89,31 +87,6 @@ void append_digit(unsigned __int128& value, unsigned digit) {
   return result;
 }
 
-[[nodiscard]] std::string scaled_to_string_unsigned(unsigned __int128 value, int scale) {
-  if (scale < 0) {
-    throw std::invalid_argument("fixed-point scale must be non-negative");
-  }
-
-  std::string digits;
-  do {
-    const auto digit = static_cast<unsigned>(value % 10);
-    digits.push_back(static_cast<char>('0' + digit));
-    value /= 10;
-  } while (value != 0);
-
-  std::reverse(digits.begin(), digits.end());
-
-  if (scale == 0) {
-    return digits;
-  }
-
-  if (digits.size() <= static_cast<std::size_t>(scale)) {
-    digits.insert(digits.begin(), static_cast<std::size_t>(scale) - digits.size() + 1, '0');
-  }
-
-  digits.insert(digits.end() - scale, '.');
-  return digits;
-}
 }
 
 Price price(std::string_view value, int scale){
@@ -126,31 +99,4 @@ Price price(std::string_view value, int scale){
 
   const auto ticks = static_cast<int64_t>(magnitude);
   return Price::from_ticks(negative ? -ticks : ticks);
-}
-
-std::string price_to_string(Price price, int scale){
-  const auto ticks = price.ticks();
-  const bool negative = ticks < 0;
-  const auto magnitude = negative
-      ? static_cast<unsigned __int128>(-(ticks + 1)) + 1
-      : static_cast<unsigned __int128>(ticks);
-
-  auto result = scaled_to_string_unsigned(magnitude, scale);
-  if (negative) {
-    result.insert(result.begin(), '-');
-  }
-  return result;
-}
-
-Quantity quantity_from_decimal_string(std::string_view value, int scale){
-  bool negative = false;
-  const auto magnitude = parse_scaled_magnitude(value, scale, false, negative);
-  if (magnitude > static_cast<unsigned __int128>(std::numeric_limits<uint64_t>::max())) {
-    throw std::out_of_range("quantity is outside uint64 range");
-  }
-  return Quantity::from_lots(static_cast<uint64_t>(magnitude));
-}
-
-std::string quantity_to_string(Quantity quantity, int scale){
-  return scaled_to_string_unsigned(quantity.lots(), scale);
 }

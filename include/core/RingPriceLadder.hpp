@@ -36,11 +36,8 @@ struct RingPriceLadder{
   void remove_level_if_empty(Price price);
   PriceLevel* best_level();
   PriceLevel* advance_best_after_empty();
-  bool should_recenter(int64_t referenceTick) const;
-  void recenter_around(int64_t referenceTick);
   void clear_slot(uint64_t slotIndex);
 
   void mark_active(uint64_t slotIndex);
   void mark_inactive(uint64_t slotIndex);
-  [[nodiscard]] bool is_active(uint64_t slotIndex) const;
 };

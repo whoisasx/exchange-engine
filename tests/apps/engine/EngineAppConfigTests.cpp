@@ -1,4 +1,4 @@
-#include "apps/engine/EngineAppConfig.hpp"
+#include "EngineAppConfig.hpp"
 
 #include <cassert>
 #include <cstdlib>

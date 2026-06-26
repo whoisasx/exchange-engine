@@ -220,15 +220,6 @@ std::vector<EngineEvent> EngineCore::process(const EngineCommand& command){
   return {make_rejection(sequenceGenerator, 0, std::nullopt, 0, 0, InvalidSymbol)};
 }
 
-std::vector<EngineEvent> EngineCore::process_many(const std::vector<EngineCommand>& commands){
-  std::vector<EngineEvent> events;
-  for(const auto& command : commands){
-    auto commandEvents=process(command);
-    events.insert(events.end(), commandEvents.begin(), commandEvents.end());
-  }
-  return events;
-}
-
 OrderBook* EngineCore::get_order_book(SymbolId symbolId){
   auto it=orderBooks.find(symbolId);
   if(it==orderBooks.end()){
@@ -243,10 +234,6 @@ const OrderBook* EngineCore::get_order_book(SymbolId symbolId) const{
     return nullptr;
   }
   return &it->second;
-}
-
-bool EngineCore::has_symbol(SymbolId symbolId) const{
-  return orderBooks.find(symbolId)!=orderBooks.end();
 }
 
 EngineSnapshot EngineCore::snapshot() const{

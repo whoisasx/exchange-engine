@@ -30,12 +30,6 @@ struct BrokerRecordContext {
   std::optional<std::string> key;
 };
 
-struct OutboundRecordContext {
-  BrokerTopic topic{BrokerTopic::EngineEvents};
-  std::string key;
-  std::optional<std::int32_t> partition;
-};
-
 enum class AdapterSide {
   Long,
   Short

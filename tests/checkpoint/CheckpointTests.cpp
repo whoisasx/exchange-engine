@@ -1,5 +1,5 @@
 #include "checkpoint/EngineCheckpointManager.hpp"
-#include "checkpoint/InMemoryCheckpointStore.hpp"
+#include "checkpoint/ICheckpointStore.hpp"
 
 #include <cassert>
 #include <cstdlib>
@@ -14,6 +14,27 @@ using namespace cex::checkpoint;
 using namespace cex::runtime;
 
 namespace {
+
+class TestCheckpointStore final : public ICheckpointStore {
+ public:
+  void save(EngineCheckpoint checkpoint) override {
+    checkpoints_.push_back(std::move(checkpoint));
+  }
+
+  [[nodiscard]] std::optional<EngineCheckpoint> load_latest() const override {
+    if (checkpoints_.empty()) {
+      return std::nullopt;
+    }
+    return checkpoints_.back();
+  }
+
+  [[nodiscard]] std::size_t size() const noexcept {
+    return checkpoints_.size();
+  }
+
+ private:
+  std::vector<EngineCheckpoint> checkpoints_;
+};
 
 SymbolConfig make_symbol() {
   return SymbolConfig{
@@ -527,7 +548,7 @@ void test_create_checkpoint_rejects_invalid_source_position() {
 }
 
 void test_in_memory_store_saves_and_loads_latest() {
-  InMemoryCheckpointStore store;
+  TestCheckpointStore store;
   assert(!store.load_latest().has_value());
 
   store.save(make_checkpoint("checkpoint-1"));

@@ -26,5 +26,4 @@ struct SideBook{
   [[nodiscard]] bool price_crosses(Price incomingPrice) const;
   PriceLevel* get_or_create_level_for_price(Price price);
   void refresh_cached_best();
-  [[nodiscard]] bool empty() const;
 };

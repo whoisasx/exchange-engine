@@ -14,8 +14,6 @@ struct FarPriceMap{
   explicit FarPriceMap(Side side);
 
   PriceLevel* get_or_create_level(Price price);
-  PriceLevel* get_level(Price price) const;
   void remove_level_if_empty(Price price);
   [[nodiscard]] PriceLevel* best_level();
-  [[nodiscard]] bool empty() const;
 };

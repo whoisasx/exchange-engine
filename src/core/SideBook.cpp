@@ -125,7 +125,3 @@ void SideBook::refresh_cached_best(){
 
   cachedBestLevel=is_better_price(side, ringBest->price, farBest->price) ? ringBest : farBest;
 }
-
-bool SideBook::empty() const{
-  return best_level()==nullptr;
-}

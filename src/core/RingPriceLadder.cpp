@@ -1,5 +1,4 @@
 #include "RingPriceLadder.hpp"
-#include <algorithm>
 #include <bit>
 #include <memory>
 
@@ -188,28 +187,6 @@ PriceLevel* RingPriceLadder::advance_best_after_empty() {
   return nullptr;
 }
 
-bool RingPriceLadder::should_recenter(int64_t referenceTick) const{
-  auto lower=baseTick;
-  auto upper=baseTick+static_cast<int64_t>(capacity)-1;
-  auto threshold = static_cast<int64_t>(capacity/10);
-
-  return referenceTick-lower<threshold || upper-referenceTick<threshold;
-}
-void RingPriceLadder::recenter_around(int64_t referenceTick) {
-  if (capacity == 0) {
-    return;
-  }
-  if (advance_best_after_empty() != nullptr) {
-    return;
-  }
-  const auto halfCapacity = static_cast<int64_t>(capacity / 2);
-  baseTick = std::max<int64_t>(0, referenceTick - halfCapacity);
-  headIndex = 0;
-  for (auto& slot : slots) {
-    slot.reset();
-  }
-  activeSlotBitmap.assign(bitmap_word_count(capacity), 0);
-}
 void RingPriceLadder::clear_slot(uint64_t slotIndex) {
   if (slotIndex >= capacity) {
     return;
@@ -232,15 +209,4 @@ void RingPriceLadder::mark_inactive(uint64_t slotIndex) {
   const auto wordIndex = slotIndex / kBitmapWordBits;
   const auto bitOffset = slotIndex % kBitmapWordBits;
   activeSlotBitmap[wordIndex] &= ~(1ULL << bitOffset);
-}
-bool RingPriceLadder::is_active(uint64_t slotIndex) const {
-  if (slotIndex >= capacity) {
-    return false;
-  }
-  const auto wordIndex = slotIndex / kBitmapWordBits;
-  if (wordIndex >= activeSlotBitmap.size()) {
-    return false;
-  }
-  const auto bitOffset = slotIndex % kBitmapWordBits;
-  return (activeSlotBitmap[wordIndex] & (1ULL << bitOffset)) != 0;
 }

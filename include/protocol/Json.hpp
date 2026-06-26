@@ -30,10 +30,7 @@ class JsonValue {
   explicit JsonValue(Object value);
 
   [[nodiscard]] bool is_null() const noexcept;
-  [[nodiscard]] bool is_bool() const noexcept;
-  [[nodiscard]] bool is_number() const noexcept;
   [[nodiscard]] bool is_string() const noexcept;
-  [[nodiscard]] bool is_array() const noexcept;
   [[nodiscard]] bool is_object() const noexcept;
 
   [[nodiscard]] const bool* as_bool() const noexcept;
@@ -43,8 +40,6 @@ class JsonValue {
   [[nodiscard]] const Object* as_object() const noexcept;
   [[nodiscard]] const JsonValue* find(std::string_view key) const;
 
-  [[nodiscard]] const Storage& storage() const noexcept;
-
  private:
   Storage storage_;
 };
@@ -52,11 +47,6 @@ class JsonValue {
 class JsonParseError : public std::runtime_error {
  public:
   JsonParseError(std::size_t offset, std::string message);
-
-  [[nodiscard]] std::size_t offset() const noexcept;
-
- private:
-  std::size_t offset_;
 };
 
 JsonValue parse_json(std::string_view text);

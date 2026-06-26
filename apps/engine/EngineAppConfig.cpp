@@ -1,4 +1,4 @@
-#include "apps/engine/EngineAppConfig.hpp"
+#include "EngineAppConfig.hpp"
 
 #include <charconv>
 #include <cctype>

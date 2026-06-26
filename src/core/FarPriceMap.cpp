@@ -10,11 +10,6 @@ PriceLevel* FarPriceMap::get_or_create_level(Price price){
   levels[price]=std::move(level);
   return levels[price].get();
 }
-PriceLevel* FarPriceMap::get_level(Price price) const{
-  auto it = levels.find(price);
-  if(it != levels.end()) return it->second.get();
-  return nullptr;
-}
 void FarPriceMap::remove_level_if_empty(Price price){
   auto it=levels.find(price);
   if(it == levels.end()) return;
@@ -33,7 +28,4 @@ PriceLevel* FarPriceMap::best_level(){
     }
   }
   return nullptr;
-}
-bool FarPriceMap::empty() const{
-  return levels.empty();
 }

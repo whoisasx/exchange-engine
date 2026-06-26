@@ -29,6 +29,5 @@ class ProtocolError : public std::runtime_error {
 ProtocolMessage parse_protocol_message(std::string_view text);
 std::optional<MessageClass> classify_engine_fixture_path(
     const std::filesystem::path& path);
-std::string_view to_string(MessageClass message_class) noexcept;
 
 }  // namespace protocol
