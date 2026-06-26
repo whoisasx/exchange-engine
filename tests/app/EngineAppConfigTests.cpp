@@ -11,7 +11,7 @@
 #include <string_view>
 #include <vector>
 
-using namespace cex::apps::engine;
+using namespace cex::engine_app;
 
 namespace {
 

@@ -11,7 +11,7 @@
 #include "core/SymbolConfig.hpp"
 #include "runtime/EngineRuntimeConfig.hpp"
 
-namespace cex::apps::engine {
+namespace cex::engine_app {
 
 inline constexpr const char* DefaultBootstrapServers = "127.0.0.1:9092";
 inline constexpr const char* DefaultConsumerGroupId = "cex-engine";
@@ -72,4 +72,4 @@ struct EngineAppConfigParseResult {
 
 [[nodiscard]] std::string engine_app_usage(std::string_view executable_name);
 
-}  // namespace cex::apps::engine
+}  // namespace cex::engine_app

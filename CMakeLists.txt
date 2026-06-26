@@ -144,7 +144,7 @@ target_link_libraries(engine_recovery
 )
 
 add_library(engine_app_config
-  apps/engine/EngineAppConfig.cpp
+  src/app/EngineAppConfig.cpp
 )
 add_library(cex::engine_app_config ALIAS engine_app_config)
 
@@ -152,7 +152,7 @@ target_compile_features(engine_app_config PUBLIC cxx_std_20)
 
 target_include_directories(engine_app_config
   PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/apps/engine>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/app>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
@@ -244,7 +244,7 @@ endif()
 
 if(TARGET cex::engine_broker_rdkafka)
   add_executable(engine_app
-    apps/engine/main.cpp
+    src/app/main.cpp
   )
 
   target_link_libraries(engine_app
@@ -397,7 +397,7 @@ if(BUILD_TESTING)
   endif()
 
   add_executable(engine_app_config_tests
-    tests/apps/engine/EngineAppConfigTests.cpp
+    tests/app/EngineAppConfigTests.cpp
   )
 
   target_link_libraries(engine_app_config_tests

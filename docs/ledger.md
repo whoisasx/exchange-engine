@@ -1,6 +1,6 @@
 # Ledger Service
 
-`apps/ledger` consumes `wallet.events` and writes an immutable accounting
+The ledger service consumes `wallet.events` and writes an immutable accounting
 trail. Wallet events are the source of balance mutations.
 
 Run:

@@ -10,7 +10,7 @@
 #include <unordered_set>
 #include <utility>
 
-namespace cex::apps::engine {
+namespace cex::engine_app {
 namespace {
 
 struct MarketConfigBuilder {
@@ -620,4 +620,4 @@ std::string engine_app_usage(std::string_view executable_name) {
          "  CEX_ENGINE_MARKETS_CONFIG\n";
 }
 
-}  // namespace cex::apps::engine
+}  // namespace cex::engine_app

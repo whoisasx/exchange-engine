@@ -1,6 +1,6 @@
 # WebSocket Live Updates
 
-`apps/ws` is the live fanout service for connected clients. It consumes `engine.events` and `wallet.events` from Redpanda and forwards newly observed events to authenticated sockets.
+The websocket service is the live fanout for connected clients. It consumes `engine.events` and `wallet.events` from Redpanda and forwards newly observed events to authenticated sockets.
 
 It does not connect to Postgres, build read models, recover missed client messages, or own durable facts. `engine.events` and `wallet.events` must carry the account and market routing fields needed by websocket clients.
 

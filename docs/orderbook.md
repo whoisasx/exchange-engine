@@ -21,7 +21,7 @@ The orderbook read model is a public market-data artifact built from `OrderBookD
 
 The projector writes the current public snapshot to `orderbook_state` and `orderbook_levels` for REST reads, history, and client recovery.
 
-`apps/orderbook-archiver` consumes `OrderBookSnapshotCreated` events and writes a local object-store-shaped JSON artifact. The default local store is `.data/orderbook-archiver/objects`, with bucket/key settings that can later map to S3:
+The orderbook archiver consumes `OrderBookSnapshotCreated` events and writes a local object-store-shaped JSON artifact. The default local store is `.data/orderbook-archiver/objects`, with bucket/key settings that can later map to S3:
 
 ```text
 ORDERBOOK_ARCHIVE_BUCKET=exchange-market-data

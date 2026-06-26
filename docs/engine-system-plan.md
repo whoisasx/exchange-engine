@@ -375,7 +375,7 @@ Live commit/checkpoint ordering:
 2. Save an engine checkpoint whose `source_position.next_offset` is `input.offset + 1`.
 3. Commit the consumed input offset to Redpanda. The rdkafka wrapper stores `offset + 1` as the Kafka resume offset.
 
-The current `apps/engine/main.cpp` path uses
+The current `src/app/main.cpp` path uses
 `RecoveryCoordinator::recover_and_replay()` at startup and passes a checkpoint
 hook into `RedpandaEngineApp` for live polling. The hook runs after output
 publish succeeds and before `RdKafkaOffsetCommitter::commit`, so a checkpoint

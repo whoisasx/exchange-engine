@@ -280,12 +280,12 @@ void run_startup_automatic_liquidation_scan(
 
 int main(int argc, char* argv[]) {
   try {
-    const auto parse_result = cex::apps::engine::parse_engine_app_config(
+    const auto parse_result = cex::engine_app::parse_engine_app_config(
         args_from_argv(argc, argv),
-        cex::apps::engine::engine_app_environment_from_process());
+        cex::engine_app::engine_app_environment_from_process());
 
     if (parse_result.help_requested) {
-      std::cout << cex::apps::engine::engine_app_usage(
+      std::cout << cex::engine_app::engine_app_usage(
           argc > 0 && argv[0] != nullptr ? argv[0] : "engine_app");
       return EXIT_SUCCESS;
     }
@@ -299,7 +299,7 @@ int main(int argc, char* argv[]) {
               << config.events_topic << " checkpoint_dir="
               << config.checkpoint_directory.string() << '\n';
 
-    auto symbols = cex::apps::engine::symbol_configs_for_runtime(config);
+    auto symbols = cex::engine_app::symbol_configs_for_runtime(config);
     cex::runtime::EngineRuntime runtime(cex::runtime::EngineRuntimeConfig{
         .symbols = std::move(symbols),
         .first_public_sequence = 1,

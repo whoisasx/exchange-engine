@@ -1,6 +1,6 @@
 # Timeseries Service
 
-`apps/timeseries` consumes `engine.events` and writes trade history and market candles.
+The timeseries service consumes `engine.events` and writes trade history and market candles.
 
 Run:
 
