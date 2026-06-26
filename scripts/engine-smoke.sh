@@ -25,6 +25,24 @@ Environment:
   ENGINE_SMOKE_RESTART_POLL_LIMIT   Restart engine_app poll limit (default 2)
   CEX_ENGINE_BOOTSTRAP_SERVERS    engine_app bootstrap servers
                                   (default 127.0.0.1:9092)
+
+Redpanda smoke:
+  When Redpanda is available, the script creates engine.input,
+  engine.replies, and engine.events if needed, seeks a temporary group to the
+  end of engine.input, produces docs/examples/engine-place-order.command.json,
+  runs engine_app once, verifies a checkpoint was written, then runs engine_app
+  again to exercise checkpoint recovery.
+
+Manual Redpanda path:
+  rpk topic create --if-not-exists --partitions 1 -c retention.ms=1800000 engine.input
+  rpk topic alter-config engine.input --set retention.ms=1800000
+  rpk topic create --if-not-exists --partitions 1 engine.replies engine.events
+  rpk group seek cex-engine-smoke-manual --to end --topics engine.input --allow-new-topics
+  rpk topic produce engine.input --key 1 --format '%v{json}' < docs/examples/engine-place-order.command.json
+  build/engine_app --group-id cex-engine-smoke-manual --checkpoint-dir .data/engine/smoke-checkpoints/manual --poll-limit 6
+  build/engine_app --group-id cex-engine-smoke-manual --checkpoint-dir .data/engine/smoke-checkpoints/manual --poll-limit 2
+  rpk topic consume engine.replies --offset "-5:end" --num 5 --format json
+  rpk topic consume engine.events --offset "-5:end" --num 5 --format json
 USAGE
 }
 

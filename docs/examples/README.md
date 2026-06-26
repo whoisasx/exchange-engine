@@ -2,6 +2,12 @@
 
 This directory contains JSON fixtures for the engine stream contract.
 
-All JSON fixtures in this directory are validated by `cargo test -p protocol` against the current `EngineInput`, `EngineReply`, and `EngineEvent` variants in `crates/protocol/src/engine.rs`.
+All JSON fixtures in this directory are parsed by the C++
+`protocol_fixture_tests` target for top-level protocol shape and fixture
+classification.
 
-The fixtures include mark price, funding, account delta, liquidation lifecycle, ADL, orderbook snapshot, and checkpoint messages. Metadata fields such as `engine_event_id`, `source_input_id`, and `source_input_offset` are first-class Rust protocol fields where they appear in the structs; optional fields should stay in fixtures when producers are expected to set them.
+The fixtures include mark price, funding, account delta, liquidation lifecycle,
+ADL, orderbook snapshot, and checkpoint messages. Metadata fields such as
+`engine_event_id`, `source_input_id`, and `source_input_offset` are first-class
+stream contract fields; optional fields should stay in fixtures when producers
+are expected to set them.

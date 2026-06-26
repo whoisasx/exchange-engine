@@ -5,7 +5,7 @@ project(core_engine
   LANGUAGES CXX
 )
 
-set(CORE_ENGINE_SOURCES
+add_library(core_engine STATIC
   src/core/EngineCore.cpp
   src/core/FarPriceMap.cpp
   src/core/FixedPoint.cpp
@@ -17,8 +17,6 @@ set(CORE_ENGINE_SOURCES
   src/core/SideBook.cpp
   src/core/Validation.cpp
 )
-
-add_library(core_engine STATIC ${CORE_ENGINE_SOURCES})
 add_library(cex::core_engine ALIAS core_engine)
 
 target_compile_features(core_engine PUBLIC cxx_std_20)
@@ -26,8 +24,8 @@ target_compile_features(core_engine PUBLIC cxx_std_20)
 target_include_directories(core_engine
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
   PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
     ${CMAKE_CURRENT_SOURCE_DIR}/include/core
 )
 
@@ -41,7 +39,6 @@ target_compile_features(engine_adapter PUBLIC cxx_std_20)
 target_include_directories(engine_adapter
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
 )
 
 target_link_libraries(engine_adapter
@@ -60,7 +57,6 @@ target_compile_features(engine_protocol PUBLIC cxx_std_20)
 target_include_directories(engine_protocol
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
 )
 
 add_library(engine_runtime
@@ -77,7 +73,8 @@ target_compile_features(engine_runtime PUBLIC cxx_std_20)
 target_include_directories(engine_runtime
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
 target_link_libraries(engine_runtime
@@ -98,7 +95,6 @@ target_compile_features(engine_checkpoint PUBLIC cxx_std_20)
 target_include_directories(engine_checkpoint
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
 )
 
 target_link_libraries(engine_checkpoint
@@ -116,7 +112,6 @@ target_compile_features(engine_broker PUBLIC cxx_std_20)
 target_include_directories(engine_broker
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
 )
 
 target_link_libraries(engine_broker
@@ -134,7 +129,6 @@ target_compile_features(engine_recovery PUBLIC cxx_std_20)
 target_include_directories(engine_recovery
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
 )
 
 target_link_libraries(engine_recovery
@@ -151,10 +145,9 @@ add_library(cex::engine_app_config ALIAS engine_app_config)
 target_compile_features(engine_app_config PUBLIC cxx_std_20)
 
 target_include_directories(engine_app_config
-  PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/app>
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/app
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
 )
 
 target_link_libraries(engine_app_config
@@ -225,7 +218,6 @@ if(ENGINE_ENABLE_RDKAFKA AND ENGINE_RDKAFKA_FOUND)
   target_include_directories(engine_broker_rdkafka
     PUBLIC
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-      $<INSTALL_INTERFACE:include>
   )
 
   target_link_libraries(engine_broker_rdkafka
@@ -252,6 +244,11 @@ if(TARGET cex::engine_broker_rdkafka)
       cex::engine_app_config
       cex::engine_recovery
       cex::engine_broker_rdkafka
+  )
+
+  target_include_directories(engine_app
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/src/app
   )
 else()
   message(STATUS "engine_app requires engine_broker_rdkafka; skipping executable")
@@ -299,6 +296,11 @@ if(BUILD_TESTING)
       cex::engine_runtime
   )
 
+  target_include_directories(runtime_tests
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+
   target_compile_definitions(runtime_tests
     PRIVATE
       PROTOCOL_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/docs/examples"
@@ -313,6 +315,11 @@ if(BUILD_TESTING)
   target_link_libraries(engine_output_serializer_tests
     PRIVATE
       cex::engine_runtime
+  )
+
+  target_include_directories(engine_output_serializer_tests
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/src
   )
 
   add_test(NAME engine_output_serializer_tests
@@ -403,6 +410,11 @@ if(BUILD_TESTING)
   target_link_libraries(engine_app_config_tests
     PRIVATE
       cex::engine_app_config
+  )
+
+  target_include_directories(engine_app_config_tests
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/src/app
   )
 
   add_test(NAME engine_app_config_tests COMMAND engine_app_config_tests)

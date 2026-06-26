@@ -80,8 +80,8 @@ void test_fixture_contracts() {
           "expected 7 input fixtures");
   require(counts[protocol::MessageClass::Reply] == 6,
           "expected 6 reply fixtures");
-  require(counts[protocol::MessageClass::Event] == 20,
-          "expected 20 event fixtures");
+  require(counts[protocol::MessageClass::Event] == 17,
+          "expected 17 event fixtures");
 }
 
 void test_fixture_classification() {

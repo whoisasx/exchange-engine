@@ -1,12 +1,16 @@
 # Engine Stream Contract
 
-This contract describes the current Rust wire protocol used by this workspace and the intended agreement with the external C++ matching engine. The base design lives in `docs/engine-system-plan.md`; this file only defines the stream contract.
+This contract describes the current engine stream protocol used by this
+workspace and the agreement with the C++ matching engine.
 
-The Rust protocol uses `engine.input` for engine-affecting inputs. `ENGINE_COMMANDS_TOPIC` remains an alias for `ENGINE_INPUT_TOPIC`, and `ENGINE_COMMANDS_LEGACY_TOPIC` names the old `engine.commands` topic for compatibility.
+The workspace protocol uses `engine.input` for engine-affecting inputs.
+`ENGINE_COMMANDS_TOPIC` remains an alias for `ENGINE_INPUT_TOPIC`, and
+`ENGINE_COMMANDS_LEGACY_TOPIC` names the old `engine.commands` topic for
+compatibility.
 
 Documentation is flattened under `docs/`. JSON examples and protocol fixtures live under `docs/examples/`.
 
-The Rust source of truth is:
+The upstream workspace protocol source of truth is:
 
 - `crates/protocol/src/common.rs`
 - `crates/protocol/src/engine.rs`
@@ -100,7 +104,7 @@ The engine must copy `request_id` into request lifecycle replies so the server c
 
 Engine inputs go to `engine.input` and are ordered by the final engine input log.
 
-Current Rust `EngineInput` variants:
+Current `EngineInput` variants:
 
 - `PlaceOrder`
 - `CancelOrder`
@@ -140,7 +144,7 @@ Payload fields:
 input_id, envelope, reservation_id, order_id, market_id, market_name, side, order_type, quantity, price, reduce_only, margin_asset, reserved_margin_amount, leverage
 ```
 
-`input_id` is optional. `order_id` is assigned before engine ingress and must be preserved by the engine. `margin_asset`, `reserved_margin_amount`, and `leverage` are first-class fields in the current Rust protocol and have defaults only for backward-compatible deserialization of older JSON.
+`input_id` is optional. `order_id` is assigned before engine ingress and must be preserved by the engine. `margin_asset`, `reserved_margin_amount`, and `leverage` are first-class fields in the current workspace protocol and have defaults only for backward-compatible deserialization of older JSON.
 
 Required engine behavior:
 
@@ -220,7 +224,7 @@ Required engine behavior:
 
 ## Liquidation Contract
 
-Liquidation eligibility is engine-owned state. Rust read models may show indicative risk, but they are not authoritative.
+Liquidation eligibility is engine-owned state. Read models may show indicative risk, but they are not authoritative.
 
 The liquidation loop must run after:
 
@@ -299,16 +303,14 @@ Event fixture locations under `docs/examples`:
 | `FundingPaymentApplied` | `docs/examples/engine-funding-payment-applied.event.json` |
 | `PositionChanged` | `docs/examples/engine-position-changed.event.json` |
 | `RiskStateUpdated` | `docs/examples/engine-risk-state-updated.event.json` |
-| `FeeCharged` | `docs/examples/engine-fee-charged.event.json` |
 | `LiquidationStarted` | `docs/examples/engine-liquidation-started.event.json` |
 | `LiquidationExecuted` | `docs/examples/engine-liquidation-executed.event.json` |
 | `LiquidationCompleted` | `docs/examples/engine-liquidation-completed.event.json` |
 | `AdlExecuted` | `docs/examples/engine-adl-executed.event.json` |
 | `AccountDelta` | `docs/examples/engine-account-delta.event.json` |
-| `OrderBookSnapshotCreated` | `docs/examples/engine-orderbook-snapshot-created.event.json` |
-| `EngineCheckpointCommitted` | `docs/examples/engine-checkpoint-committed.event.json` |
 
-Current Rust protocol tests validate all JSON fixtures in `docs/examples` against `EngineInput`, `EngineReply`, or `EngineEvent`.
+The C++ `protocol_fixture_tests` target validates every JSON fixture in
+`docs/examples` for top-level protocol shape and known fixture classification.
 
 Consumers route market-scoped events with `market_id` and account fields such as `user_id`, `maker_user_id`, `taker_user_id`, `payments[].user_id`, or other variant-specific account identifiers. Engine-wide checkpoint events are recovery/audit signals and are not user-routed.
 
@@ -328,19 +330,20 @@ Orderbook snapshots and deltas use the same per-market sequence. A snapshot carr
 
 ## Compatibility Rules
 
-- Do not rename JSON fields without updating Rust protocol tests and fixtures.
+- Do not rename JSON fields without updating protocol tests and fixtures.
 - Do not change enum casing.
 - Always include the top-level `type` and `payload` fields.
-- Unknown extra fields are ignored by Rust serde today, but the engine should not rely on that for required behavior.
+- Unknown extra fields may be ignored by some consumers today, but the engine
+  should not rely on that for required behavior.
 - New optional fields should be added in a backward-compatible way.
 - Required field changes should be treated as a protocol version change.
 
 ## Fixture Validation
 
-The protocol crate has tests that deserialize every fixture in `docs/examples`.
+The C++ protocol fixture test parses every fixture in `docs/examples`.
 
 Run:
 
 ```sh
-cargo test -p protocol
+ctest --test-dir build --output-on-failure -R '^protocol_fixture_tests$'
 ```
