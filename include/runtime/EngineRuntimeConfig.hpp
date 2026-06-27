@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -33,6 +34,15 @@ struct EngineOutputRecord {
   std::string key;
   std::optional<std::int32_t> partition;
   PayloadFields payload;
+};
+
+struct EngineTraceSummary {
+  std::optional<std::string> request_id;
+  std::optional<std::string> source_input_id;
+  std::size_t reply_count{0};
+  std::size_t event_count{0};
+  bool duplicate{false};
+  bool no_output{false};
 };
 
 enum class EngineProcessStatus {
@@ -70,6 +80,44 @@ struct EngineProcessResult {
 
   [[nodiscard]] bool empty() const noexcept {
     return replies.empty() && events.empty();
+  }
+
+  [[nodiscard]] EngineTraceSummary trace_summary() const {
+    EngineTraceSummary summary{
+        .reply_count = replies.size(),
+        .event_count = events.size(),
+        .duplicate = status == EngineProcessStatus::Duplicate,
+        .no_output = empty(),
+    };
+
+    const auto capture = [&summary](const EngineOutputRecord& record) {
+      if (!summary.request_id.has_value()) {
+        if (const auto found = record.payload.find("request_id");
+            found != record.payload.end()) {
+          if (const auto* value = found->second.as_string();
+              value != nullptr && !value->empty()) {
+            summary.request_id = *value;
+          }
+        }
+      }
+      if (!summary.source_input_id.has_value()) {
+        if (const auto found = record.payload.find("source_input_id");
+            found != record.payload.end()) {
+          if (const auto* value = found->second.as_string();
+              value != nullptr && !value->empty()) {
+            summary.source_input_id = *value;
+          }
+        }
+      }
+    };
+
+    for (const auto& reply : replies) {
+      capture(reply);
+    }
+    for (const auto& event : events) {
+      capture(event);
+    }
+    return summary;
   }
 };
 

@@ -125,6 +125,7 @@ EngineBrokerAppResult RedpandaEngineApp::consume(
   }
 
   result.process_status = process_result.status;
+  result.trace = process_result.trace_summary();
 
   result.publish_result = publish(process_result);
   if (!result.publish_result.ok()) {

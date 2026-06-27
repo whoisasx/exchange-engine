@@ -295,6 +295,13 @@ void test_successful_place_order_publishes_then_commits() {
 
   assert(result.status == EngineBrokerAppStatus::Processed);
   assert(result.committed);
+  assert(result.trace.has_value());
+  assert(result.trace->request_id == "req_place_001");
+  assert(result.trace->source_input_id == "input_place_001");
+  assert(result.trace->reply_count == 1);
+  assert(result.trace->event_count == 2);
+  assert(!result.trace->duplicate);
+  assert(!result.trace->no_output);
   assert(result.publish_result.ok());
   assert(result.publish_result.attempted == 3);
   assert(result.publish_result.published == 3);
@@ -432,6 +439,12 @@ void test_duplicate_no_output_result_commits_without_publishes() {
   assert(duplicate.status == EngineBrokerAppStatus::Processed);
   assert(duplicate.process_status == cex::runtime::EngineProcessStatus::Duplicate);
   assert(duplicate.committed);
+  assert(duplicate.trace.has_value());
+  assert(!duplicate.trace->request_id.has_value());
+  assert(duplicate.trace->reply_count == 0);
+  assert(duplicate.trace->event_count == 0);
+  assert(duplicate.trace->duplicate);
+  assert(duplicate.trace->no_output);
   assert(duplicate.publish_result.ok());
   assert(duplicate.publish_result.attempted == 0);
   assert(duplicate.publish_result.published == 0);

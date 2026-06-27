@@ -966,6 +966,8 @@ void test_runtime_resting_limit_order() {
   assert(reply.partition == 0);
   assert(reply.payload.at("request_id") == "req_place_001");
   assert(reply.payload.at("source_input_id") == "input_place_001");
+  assert(reply.payload.at("source_input_topic") == EngineInputTopic);
+  assert(reply.payload.at("source_input_partition").as_number()->text == "0");
   assert(reply.payload.at("source_input_offset") == "1201");
   assert(reply.payload.at("order_id") == "9001");
   assert(reply.payload.at("reservation_id") == "res_place_001");
@@ -981,6 +983,9 @@ void test_runtime_resting_limit_order() {
   assert(opened != nullptr);
   assert(opened->payload.at("engine_sequence") == "1");
   assert(opened->payload.at("engine_timestamp_ms") == "1710000000000");
+  assert(opened->payload.at("request_id") == "req_place_001");
+  assert(opened->payload.at("source_input_topic") == EngineInputTopic);
+  assert(opened->payload.at("source_input_partition").as_number()->text == "0");
   assert(opened->payload.at("source_input_offset") == "1201");
   assert(opened->payload.at("order_id") == "9001");
   assert(opened->payload.at("market_id") == "1");
@@ -1394,6 +1399,8 @@ void test_runtime_mark_price_updated_emits_event_without_reply() {
   assert(event.payload.at("engine_sequence") == "1");
   assert(event.payload.at("engine_timestamp_ms") == "1710000000000");
   assert(event.payload.at("source_input_id") == "input_mark_001");
+  assert(event.payload.at("source_input_topic") == EngineInputTopic);
+  assert(event.payload.at("source_input_partition").as_number()->text == "0");
   assert(event.payload.at("source_input_offset") == "1601");
   assert(event.payload.at("market_id") == "1");
   assert(event.payload.at("mark_price") == "100");

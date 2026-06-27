@@ -137,6 +137,7 @@ struct EngineBrokerAppResult {
   EngineBrokerAppStatus status{EngineBrokerAppStatus::NoRecord};
   std::optional<ConsumedRecord> source;
   std::optional<runtime::EngineProcessStatus> process_status;
+  std::optional<runtime::EngineTraceSummary> trace;
   runtime::EnginePublishResult publish_result;
   bool committed{false};
   std::string error;

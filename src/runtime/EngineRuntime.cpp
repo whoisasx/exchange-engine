@@ -135,6 +135,9 @@ template <typename Value>
       {"engine_sequence", text(sequence)},
       {"engine_event_id", "eng_" + text(input.market_id) + "_" + text(sequence)},
       {"engine_timestamp_ms", text(clock ? clock() : 0)},
+      {"source_input_topic", record.topic},
+      {"source_input_partition",
+       PayloadValue::number_text(text(record.partition))},
       {"source_input_offset", text(record.offset)},
       {"market_id", text(input.market_id)},
       {"mark_price", text(input.mark_price)},
@@ -166,6 +169,9 @@ template <typename Value>
       {"engine_sequence", text(sequence)},
       {"engine_event_id", "eng_" + text(input.market_id) + "_" + text(sequence)},
       {"engine_timestamp_ms", text(clock ? clock() : 0)},
+      {"source_input_topic", record.topic},
+      {"source_input_partition",
+       PayloadValue::number_text(text(record.partition))},
       {"source_input_offset", text(record.offset)},
       {"market_id", text(input.market_id)},
       {"funding_interval_id", input.funding_interval_id},
@@ -561,6 +567,8 @@ void add_runtime_source_fields(PayloadFields& payload,
   if (input_id.has_value()) {
     payload.emplace("source_input_id", *input_id);
   }
+  payload.emplace("source_input_topic", record.topic);
+  payload.emplace("source_input_partition", number_value(record.partition));
   payload.emplace("source_input_offset", number_value(record.offset));
 }
 
@@ -581,11 +589,15 @@ void add_runtime_engine_fields(
     cex::adapter::MarketId market_id,
     const InboundEngineRecord& record,
     const std::optional<std::string>& input_id,
+    const std::optional<std::string>& request_id,
     cex::adapter::MarketSequenceGenerator& market_sequences,
     const EngineRuntimeClock& clock,
     PayloadFields payload) {
   add_runtime_engine_fields(payload, market_id, market_sequences, clock);
   add_runtime_source_fields(payload, record, input_id);
+  if (request_id.has_value() && !request_id->empty()) {
+    payload.emplace("request_id", *request_id);
+  }
   payload.emplace("market_id", number_value(market_id));
 
   return EngineOutputRecord{
@@ -638,6 +650,7 @@ void add_runtime_engine_fields(
                                    input.market_id,
                                    record,
                                    input.input_id,
+                                   input.envelope.request_id,
                                    market_sequences,
                                    clock,
                                    std::move(payload));
@@ -661,6 +674,7 @@ void add_runtime_engine_fields(
                                    metadata.market_id,
                                    record,
                                    metadata.place_input_id,
+                                   std::nullopt,
                                    market_sequences,
                                    clock,
                                    std::move(payload));
@@ -694,6 +708,7 @@ void add_runtime_engine_fields(
                                    input.market_id,
                                    record,
                                    input.input_id,
+                                   std::nullopt,
                                    market_sequences,
                                    clock,
                                    std::move(payload));
@@ -726,6 +741,7 @@ void add_runtime_engine_fields(
                                    risk.market_id,
                                    record,
                                    input_id,
+                                   std::nullopt,
                                    market_sequences,
                                    clock,
                                    std::move(payload));
@@ -798,6 +814,7 @@ void add_runtime_engine_fields(
                                    input.market_id,
                                    record,
                                    input.input_id,
+                                   input.envelope.request_id,
                                    market_sequences,
                                    clock,
                                    std::move(payload));
@@ -823,6 +840,7 @@ void add_runtime_engine_fields(
                                    input.market_id,
                                    record,
                                    input.input_id,
+                                   input.envelope.request_id,
                                    market_sequences,
                                    clock,
                                    std::move(payload));

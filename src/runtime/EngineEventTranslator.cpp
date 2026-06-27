@@ -124,6 +124,9 @@ void add_source_fields(PayloadFields& payload,
   if (context.input_id.has_value()) {
     payload.emplace("source_input_id", *context.input_id);
   }
+  payload.emplace("source_input_topic", context.source.topic);
+  payload.emplace("source_input_partition",
+                  PayloadValue::number_text(text(context.source.partition)));
   payload.emplace("source_input_offset", text(context.source.offset));
 }
 
@@ -163,6 +166,9 @@ void add_engine_fields(PayloadFields& payload,
     PayloadFields payload) {
   add_engine_fields(payload, market_id, market_sequences, clock);
   add_source_fields(payload, context);
+  if (!context.request_id.empty()) {
+    payload.emplace("request_id", context.request_id);
+  }
   payload.emplace("market_id", text(market_id));
 
   return EngineOutputRecord{

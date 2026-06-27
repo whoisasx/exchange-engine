@@ -97,6 +97,26 @@ namespace {
   return value ? "true" : "false";
 }
 
+void log_trace_summary(
+    const std::optional<cex::runtime::EngineTraceSummary>& trace) {
+  if (!trace.has_value()) {
+    std::cerr << " request_id=<none> source_input_id=<none>"
+              << " reply_count=0 event_count=0"
+              << " duplicate=<none> no_output=<none>";
+    return;
+  }
+
+  std::cerr << " request_id="
+            << (trace->request_id.has_value() ? *trace->request_id : "<none>")
+            << " source_input_id="
+            << (trace->source_input_id.has_value() ? *trace->source_input_id
+                                                   : "<none>")
+            << " reply_count=" << trace->reply_count
+            << " event_count=" << trace->event_count
+            << " duplicate=" << bool_name(trace->duplicate)
+            << " no_output=" << bool_name(trace->no_output);
+}
+
 [[nodiscard]] std::int64_t next_offset(const cex::broker::ConsumedRecord& source) {
   if (source.offset == std::numeric_limits<std::int64_t>::max()) {
     throw std::runtime_error("cannot checkpoint source offset without overflow");
@@ -377,6 +397,7 @@ int main(int argc, char* argv[]) {
                   << result.source->partition << "] offset="
                   << result.source->offset;
       }
+      log_trace_summary(result.trace);
       std::cerr << '\n';
     }
 
