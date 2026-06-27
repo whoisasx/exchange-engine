@@ -84,9 +84,12 @@ target_link_libraries(engine_runtime
     cex::engine_protocol
 )
 
+find_package(CURL REQUIRED)
+
 add_library(engine_checkpoint
   src/checkpoint/EngineCheckpointManager.cpp
   src/checkpoint/file/FileCheckpointStore.cpp
+  src/checkpoint/s3/S3CheckpointStore.cpp
 )
 add_library(cex::engine_checkpoint ALIAS engine_checkpoint)
 
@@ -100,6 +103,8 @@ target_include_directories(engine_checkpoint
 target_link_libraries(engine_checkpoint
   PUBLIC
     cex::engine_runtime
+  PRIVATE
+    CURL::libcurl
 )
 
 add_library(engine_broker
@@ -323,7 +328,7 @@ if(BUILD_TESTING)
   )
 
   add_test(NAME engine_output_serializer_tests
-           COMMAND engine_output_serializer_tests)
+          COMMAND engine_output_serializer_tests)
 
   add_executable(engine_smoke
     tests/smoke/EngineSmoke.cpp
@@ -362,6 +367,17 @@ if(BUILD_TESTING)
   )
 
   add_test(NAME checkpoint_file_tests COMMAND checkpoint_file_tests)
+
+  add_executable(checkpoint_s3_tests
+    tests/checkpoint/s3/S3CheckpointStoreTests.cpp
+  )
+
+  target_link_libraries(checkpoint_s3_tests
+    PRIVATE
+      cex::engine_checkpoint
+  )
+
+  add_test(NAME checkpoint_s3_tests COMMAND checkpoint_s3_tests)
 
   add_executable(broker_tests
     tests/broker/RedpandaEngineAppTests.cpp

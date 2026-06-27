@@ -24,6 +24,7 @@
       "asset": "USDC",
       "amount": 5
     },
+    "fee_deltas": [],
     "settlements": [
       {
         "reservation_id": "res_maker_002",

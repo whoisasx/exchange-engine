@@ -2,7 +2,9 @@
 #include "broker/RedpandaEngineApp.hpp"
 #include "broker/rdkafka/RdKafkaEngineBroker.hpp"
 #include "checkpoint/EngineCheckpointManager.hpp"
+#include "checkpoint/ICheckpointStore.hpp"
 #include "checkpoint/file/FileCheckpointStore.hpp"
+#include "checkpoint/s3/S3CheckpointStore.hpp"
 #include "recovery/RecoveryCoordinator.hpp"
 #include "runtime/EngineRuntime.hpp"
 
@@ -12,6 +14,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -97,6 +100,61 @@ namespace {
   return value ? "true" : "false";
 }
 
+[[nodiscard]] const char* checkpoint_store_name(
+    cex::engine_app::EngineCheckpointStoreKind kind) {
+  switch (kind) {
+    case cex::engine_app::EngineCheckpointStoreKind::File:
+      return "file";
+    case cex::engine_app::EngineCheckpointStoreKind::S3:
+      return "s3";
+  }
+  return "unknown";
+}
+
+[[nodiscard]] cex::checkpoint::S3CheckpointStoreConfig s3_checkpoint_config(
+    const cex::engine_app::EngineS3CheckpointConfig& config) {
+  return cex::checkpoint::S3CheckpointStoreConfig{
+      .endpoint = config.endpoint,
+      .bucket = config.bucket,
+      .access_key = config.access_key,
+      .secret_key = config.secret_key,
+      .region = config.region,
+      .prefix = config.prefix,
+  };
+}
+
+[[nodiscard]] std::unique_ptr<cex::checkpoint::ICheckpointStore>
+make_checkpoint_store(const cex::engine_app::EngineAppConfig& config) {
+  switch (config.checkpoint_store) {
+    case cex::engine_app::EngineCheckpointStoreKind::File:
+      return std::make_unique<cex::checkpoint::FileCheckpointStore>(
+          config.checkpoint_directory);
+    case cex::engine_app::EngineCheckpointStoreKind::S3:
+      return std::make_unique<cex::checkpoint::S3CheckpointStore>(
+          s3_checkpoint_config(config.s3_checkpoint));
+  }
+  throw std::invalid_argument("unknown checkpoint store kind");
+}
+
+[[nodiscard]] std::string checkpoint_store_summary(
+    const cex::engine_app::EngineAppConfig& config) {
+  std::ostringstream summary;
+  summary << "checkpoint_store=" << checkpoint_store_name(config.checkpoint_store);
+  if (config.checkpoint_store ==
+      cex::engine_app::EngineCheckpointStoreKind::File) {
+    summary << " checkpoint_dir=" << config.checkpoint_directory.string();
+  } else {
+    summary << " checkpoint_s3_endpoint=" << config.s3_checkpoint.endpoint
+            << " checkpoint_s3_bucket=" << config.s3_checkpoint.bucket
+            << " checkpoint_s3_region=" << config.s3_checkpoint.region
+            << " checkpoint_s3_prefix="
+            << (config.s3_checkpoint.prefix.empty()
+                    ? std::string{"<none>"}
+                    : config.s3_checkpoint.prefix);
+  }
+  return summary.str();
+}
+
 void log_trace_summary(
     const std::optional<cex::runtime::EngineTraceSummary>& trace) {
   if (!trace.has_value()) {
@@ -146,7 +204,7 @@ std::optional<std::string> save_checkpoint_for_source(
     const cex::checkpoint::CheckpointSourcePosition& source_position,
     const cex::runtime::EngineRuntime& runtime,
     cex::checkpoint::EngineCheckpointManager& checkpoint_manager,
-    cex::checkpoint::FileCheckpointStore& checkpoint_store) {
+    cex::checkpoint::ICheckpointStore& checkpoint_store) {
   auto checkpoint = checkpoint_manager.create_checkpoint(
       runtime, source_position, checkpoint_id_for(source_position));
   const auto checkpoint_id = checkpoint.checkpoint_id;
@@ -162,7 +220,7 @@ std::optional<std::string> save_checkpoint_for_source(
     const cex::broker::ConsumedRecord& source,
     const cex::runtime::EngineRuntime& runtime,
     cex::checkpoint::EngineCheckpointManager& checkpoint_manager,
-    cex::checkpoint::FileCheckpointStore& checkpoint_store) {
+    cex::checkpoint::ICheckpointStore& checkpoint_store) {
   return save_checkpoint_for_source(
       cex::checkpoint::CheckpointSourcePosition{
           .topic = source.topic,
@@ -176,7 +234,7 @@ std::optional<std::string> save_checkpoint_for_source(
 
 void log_recovery_result(
     const cex::recovery::RecoveryResult& result,
-    const cex::checkpoint::FileCheckpointStore& checkpoint_store) {
+    const cex::engine_app::EngineAppConfig& config) {
   std::cerr << "engine_app recovery status=" << status_name(result.status);
   if (result.checkpoint_id.empty()) {
     std::cerr << " checkpoint_id=<none>";
@@ -184,7 +242,7 @@ void log_recovery_result(
     std::cerr << " checkpoint_id=" << result.checkpoint_id;
   }
 
-  std::cerr << " checkpoint_dir=" << checkpoint_store.directory().string();
+  std::cerr << ' ' << checkpoint_store_summary(config);
   if (result.source_position.has_value()) {
     const auto& position = *result.source_position;
     std::cerr << " source=" << position.topic << '[' << position.partition
@@ -267,7 +325,7 @@ void run_startup_automatic_liquidation_scan(
     const cex::recovery::RecoveryResult& recovery_result,
     const std::string& fallback_input_topic,
     cex::checkpoint::EngineCheckpointManager& checkpoint_manager,
-    cex::checkpoint::FileCheckpointStore& checkpoint_store) {
+    cex::checkpoint::ICheckpointStore& checkpoint_store) {
   auto process_result =
       runtime.evaluate_all_automatic_liquidations(startup_liquidation_source());
   if (process_result.empty()) {
@@ -316,8 +374,8 @@ int main(int argc, char* argv[]) {
               << config.consumer_group_id << " input_topic="
               << config.input_topic << " replies_topic="
               << config.replies_topic << " events_topic="
-              << config.events_topic << " checkpoint_dir="
-              << config.checkpoint_directory.string() << '\n';
+              << config.events_topic << ' '
+              << checkpoint_store_summary(config) << '\n';
 
     auto symbols = cex::engine_app::symbol_configs_for_runtime(config);
     cex::runtime::EngineRuntime runtime(cex::runtime::EngineRuntimeConfig{
@@ -325,8 +383,7 @@ int main(int argc, char* argv[]) {
         .first_public_sequence = 1,
     });
 
-    cex::checkpoint::FileCheckpointStore checkpoint_store(
-        config.checkpoint_directory);
+    auto checkpoint_store = make_checkpoint_store(config);
     cex::checkpoint::EngineCheckpointManager checkpoint_manager;
 
     cex::broker::RdKafkaConsumerConfig consumer_config{
@@ -342,9 +399,9 @@ int main(int argc, char* argv[]) {
 
     cex::broker::RdKafkaEngineInputConsumer consumer(consumer_config);
     cex::recovery::RecoveryCoordinator recovery_coordinator(
-        checkpoint_store, consumer, runtime, checkpoint_manager);
+        *checkpoint_store, consumer, runtime, checkpoint_manager);
     const auto recovery_result = recovery_coordinator.recover_and_replay();
-    log_recovery_result(recovery_result, checkpoint_store);
+    log_recovery_result(recovery_result, config);
     fail_if_recovery_incomplete(recovery_result);
 
     cex::broker::RdKafkaEngineRecordProducer producer(producer_config);
@@ -359,7 +416,7 @@ int main(int argc, char* argv[]) {
           return save_checkpoint_for_source(source,
                                             checkpoint_runtime,
                                             checkpoint_manager,
-                                            checkpoint_store);
+                                            *checkpoint_store);
         });
 
     run_startup_automatic_liquidation_scan(runtime,
@@ -367,7 +424,7 @@ int main(int argc, char* argv[]) {
                                            recovery_result,
                                            config.input_topic,
                                            checkpoint_manager,
-                                           checkpoint_store);
+                                           *checkpoint_store);
 
     std::uint64_t poll_count{0};
     while (!config.poll_loop_limit.has_value() ||

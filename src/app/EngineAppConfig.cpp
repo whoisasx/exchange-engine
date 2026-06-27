@@ -51,6 +51,29 @@ void require_non_blank(std::string_view value, std::string_view name) {
   }
 }
 
+[[nodiscard]] std::string lowercase(std::string_view value) {
+  std::string lowered;
+  lowered.reserve(value.size());
+  for (const unsigned char ch : value) {
+    lowered.push_back(static_cast<char>(std::tolower(ch)));
+  }
+  return lowered;
+}
+
+[[nodiscard]] EngineCheckpointStoreKind parse_checkpoint_store_kind(
+    std::string_view value,
+    std::string_view name) {
+  require_non_blank(value, name);
+  const std::string lowered = lowercase(value);
+  if (lowered == "file") {
+    return EngineCheckpointStoreKind::File;
+  }
+  if (lowered == "s3") {
+    return EngineCheckpointStoreKind::S3;
+  }
+  throw std::invalid_argument(std::string(name) + " must be s3 or file");
+}
+
 [[nodiscard]] std::string_view trim(std::string_view value) {
   while (!value.empty() &&
          std::isspace(static_cast<unsigned char>(value.front())) != 0) {
@@ -446,9 +469,41 @@ void apply_environment(EngineAppConfig& config,
     require_non_blank(*environment.consumer_group_id, ConsumerGroupIdEnv);
     config.consumer_group_id = *environment.consumer_group_id;
   }
+  if (environment.checkpoint_store.has_value()) {
+    config.checkpoint_store = parse_checkpoint_store_kind(
+        *environment.checkpoint_store, CheckpointStoreEnv);
+  }
   if (environment.checkpoint_directory.has_value()) {
     require_non_blank(*environment.checkpoint_directory, CheckpointDirectoryEnv);
     config.checkpoint_directory = *environment.checkpoint_directory;
+  }
+  if (environment.checkpoint_s3_endpoint.has_value()) {
+    require_non_blank(*environment.checkpoint_s3_endpoint,
+                      CheckpointS3EndpointEnv);
+    config.s3_checkpoint.endpoint = *environment.checkpoint_s3_endpoint;
+  }
+  if (environment.checkpoint_s3_bucket.has_value()) {
+    require_non_blank(*environment.checkpoint_s3_bucket,
+                      CheckpointS3BucketEnv);
+    config.s3_checkpoint.bucket = *environment.checkpoint_s3_bucket;
+  }
+  if (environment.checkpoint_s3_access_key.has_value()) {
+    require_non_blank(*environment.checkpoint_s3_access_key,
+                      CheckpointS3AccessKeyEnv);
+    config.s3_checkpoint.access_key = *environment.checkpoint_s3_access_key;
+  }
+  if (environment.checkpoint_s3_secret_key.has_value()) {
+    require_non_blank(*environment.checkpoint_s3_secret_key,
+                      CheckpointS3SecretKeyEnv);
+    config.s3_checkpoint.secret_key = *environment.checkpoint_s3_secret_key;
+  }
+  if (environment.checkpoint_s3_region.has_value()) {
+    require_non_blank(*environment.checkpoint_s3_region,
+                      CheckpointS3RegionEnv);
+    config.s3_checkpoint.region = *environment.checkpoint_s3_region;
+  }
+  if (environment.checkpoint_s3_prefix.has_value()) {
+    config.s3_checkpoint.prefix = *environment.checkpoint_s3_prefix;
   }
   if (environment.poll_loop_limit.has_value()) {
     config.poll_loop_limit =
@@ -504,7 +559,9 @@ EngineAppConfig default_engine_app_config() {
       .input_topic = cex::runtime::EngineInputTopic,
       .replies_topic = cex::runtime::EngineRepliesTopic,
       .events_topic = cex::runtime::EngineEventsTopic,
+      .checkpoint_store = EngineCheckpointStoreKind::S3,
       .checkpoint_directory = DefaultCheckpointDirectory,
+      .s3_checkpoint = EngineS3CheckpointConfig{},
       .markets = {default_sol_perp_market_config()},
       .poll_loop_limit = std::nullopt,
       .once = false,
@@ -515,7 +572,14 @@ EngineAppEnvironment engine_app_environment_from_process() {
   return EngineAppEnvironment{
       .bootstrap_servers = read_env(BootstrapServersEnv),
       .consumer_group_id = read_env(ConsumerGroupIdEnv),
+      .checkpoint_store = read_env(CheckpointStoreEnv),
       .checkpoint_directory = read_env(CheckpointDirectoryEnv),
+      .checkpoint_s3_endpoint = read_env(CheckpointS3EndpointEnv),
+      .checkpoint_s3_bucket = read_env(CheckpointS3BucketEnv),
+      .checkpoint_s3_access_key = read_env(CheckpointS3AccessKeyEnv),
+      .checkpoint_s3_secret_key = read_env(CheckpointS3SecretKeyEnv),
+      .checkpoint_s3_region = read_env(CheckpointS3RegionEnv),
+      .checkpoint_s3_prefix = read_env(CheckpointS3PrefixEnv),
       .poll_loop_limit = read_env(PollLoopLimitEnv),
       .markets_config = read_env(MarketsConfigEnv),
   };
@@ -561,6 +625,57 @@ EngineAppConfigParseResult parse_engine_app_config(
       result.config.checkpoint_directory = std::move(value);
       continue;
     }
+    if (arg == "--checkpoint-store" ||
+        starts_with(arg, "--checkpoint-store=")) {
+      const auto value = take_option_value(args, index, "--checkpoint-store");
+      result.config.checkpoint_store =
+          parse_checkpoint_store_kind(value, "--checkpoint-store");
+      continue;
+    }
+    if (arg == "--checkpoint-s3-endpoint" ||
+        starts_with(arg, "--checkpoint-s3-endpoint=")) {
+      auto value =
+          take_option_value(args, index, "--checkpoint-s3-endpoint");
+      require_non_blank(value, "--checkpoint-s3-endpoint");
+      result.config.s3_checkpoint.endpoint = std::move(value);
+      continue;
+    }
+    if (arg == "--checkpoint-s3-bucket" ||
+        starts_with(arg, "--checkpoint-s3-bucket=")) {
+      auto value = take_option_value(args, index, "--checkpoint-s3-bucket");
+      require_non_blank(value, "--checkpoint-s3-bucket");
+      result.config.s3_checkpoint.bucket = std::move(value);
+      continue;
+    }
+    if (arg == "--checkpoint-s3-access-key" ||
+        starts_with(arg, "--checkpoint-s3-access-key=")) {
+      auto value =
+          take_option_value(args, index, "--checkpoint-s3-access-key");
+      require_non_blank(value, "--checkpoint-s3-access-key");
+      result.config.s3_checkpoint.access_key = std::move(value);
+      continue;
+    }
+    if (arg == "--checkpoint-s3-secret-key" ||
+        starts_with(arg, "--checkpoint-s3-secret-key=")) {
+      auto value =
+          take_option_value(args, index, "--checkpoint-s3-secret-key");
+      require_non_blank(value, "--checkpoint-s3-secret-key");
+      result.config.s3_checkpoint.secret_key = std::move(value);
+      continue;
+    }
+    if (arg == "--checkpoint-s3-region" ||
+        starts_with(arg, "--checkpoint-s3-region=")) {
+      auto value = take_option_value(args, index, "--checkpoint-s3-region");
+      require_non_blank(value, "--checkpoint-s3-region");
+      result.config.s3_checkpoint.region = std::move(value);
+      continue;
+    }
+    if (arg == "--checkpoint-s3-prefix" ||
+        starts_with(arg, "--checkpoint-s3-prefix=")) {
+      result.config.s3_checkpoint.prefix =
+          take_option_value(args, index, "--checkpoint-s3-prefix");
+      continue;
+    }
     if (arg == "--markets-config" || starts_with(arg, "--markets-config=")) {
       auto value = take_option_value(args, index, "--markets-config");
       require_non_blank(value, "--markets-config");
@@ -604,8 +719,20 @@ std::string engine_app_usage(std::string_view executable_name) {
          "(default 127.0.0.1:9092)\n"
          "  --group-id <group>             Consumer group id "
          "(default cex-engine)\n"
-         "  --checkpoint-dir <path>        File checkpoint directory "
+         "  --checkpoint-store <s3|file>   Checkpoint backend "
+         "(default s3; file is local dev/test fallback)\n"
+         "  --checkpoint-dir <path>        File checkpoint directory, used "
+         "only with --checkpoint-store=file "
          "(default .data/engine/checkpoints)\n"
+         "  --checkpoint-s3-endpoint <url> S3/MinIO endpoint "
+         "(default http://127.0.0.1:59000)\n"
+         "  --checkpoint-s3-bucket <name>  S3 checkpoint bucket "
+         "(default exchange-checkpoints)\n"
+         "  --checkpoint-s3-access-key <key>\n"
+         "  --checkpoint-s3-secret-key <secret>\n"
+         "  --checkpoint-s3-region <name>  S3 signing region "
+         "(default us-east-1)\n"
+         "  --checkpoint-s3-prefix <path>  Optional S3 object prefix\n"
          "  --markets-config <path>        Market config file; repeat "
          "[[market]] sections with key=value fields\n"
          "  --poll-limit <count>           Stop after count poll attempts\n"
@@ -615,7 +742,14 @@ std::string engine_app_usage(std::string_view executable_name) {
          "Environment:\n"
          "  CEX_ENGINE_BOOTSTRAP_SERVERS\n"
          "  CEX_ENGINE_GROUP_ID\n"
+         "  CEX_ENGINE_CHECKPOINT_STORE\n"
          "  CEX_ENGINE_CHECKPOINT_DIR\n"
+         "  CEX_ENGINE_CHECKPOINT_S3_ENDPOINT\n"
+         "  CEX_ENGINE_CHECKPOINT_S3_BUCKET\n"
+         "  CEX_ENGINE_CHECKPOINT_S3_ACCESS_KEY\n"
+         "  CEX_ENGINE_CHECKPOINT_S3_SECRET_KEY\n"
+         "  CEX_ENGINE_CHECKPOINT_S3_REGION\n"
+         "  CEX_ENGINE_CHECKPOINT_S3_PREFIX\n"
          "  CEX_ENGINE_POLL_LIMIT\n"
          "  CEX_ENGINE_MARKETS_CONFIG\n";
 }

@@ -87,7 +87,7 @@ void assert_custom_market(const EngineMarketConfig& market,
   assert(symbol.tradingEnabled == trading_enabled);
 }
 
-void test_defaults_are_local_friendly() {
+void test_defaults_are_minio_friendly() {
   const auto parsed = parse_engine_app_config({});
   const auto& config = parsed.config;
 
@@ -97,7 +97,14 @@ void test_defaults_are_local_friendly() {
   assert(config.input_topic == cex::runtime::EngineInputTopic);
   assert(config.replies_topic == cex::runtime::EngineRepliesTopic);
   assert(config.events_topic == cex::runtime::EngineEventsTopic);
+  assert(config.checkpoint_store == EngineCheckpointStoreKind::S3);
   assert(config.checkpoint_directory == ".data/engine/checkpoints");
+  assert(config.s3_checkpoint.endpoint == "http://127.0.0.1:59000");
+  assert(config.s3_checkpoint.bucket == "exchange-checkpoints");
+  assert(config.s3_checkpoint.access_key == "minioadmin");
+  assert(config.s3_checkpoint.secret_key == "minioadmin");
+  assert(config.s3_checkpoint.region == "us-east-1");
+  assert(config.s3_checkpoint.prefix.empty());
   assert(!config.poll_loop_limit.has_value());
   assert(!config.once);
 
@@ -115,11 +122,28 @@ void test_defaults_are_local_friendly() {
   assert(market.symbol_config.tradingEnabled);
 }
 
+void test_file_checkpoint_store_is_opt_in_fallback() {
+  const auto config =
+      parse_engine_app_config({"--checkpoint-store=file",
+                               "--checkpoint-dir=dev/checkpoints"})
+          .config;
+
+  assert(config.checkpoint_store == EngineCheckpointStoreKind::File);
+  assert(config.checkpoint_directory == "dev/checkpoints");
+}
+
 void test_environment_overrides_defaults() {
   const EngineAppEnvironment environment{
       .bootstrap_servers = "redpanda:9092",
       .consumer_group_id = "local-engine",
+      .checkpoint_store = "s3",
       .checkpoint_directory = "tmp/checkpoints",
+      .checkpoint_s3_endpoint = "http://minio:9000",
+      .checkpoint_s3_bucket = "engine-checkpoints",
+      .checkpoint_s3_access_key = "access",
+      .checkpoint_s3_secret_key = "secret",
+      .checkpoint_s3_region = "local",
+      .checkpoint_s3_prefix = "blue",
       .poll_loop_limit = "7",
   };
 
@@ -127,7 +151,14 @@ void test_environment_overrides_defaults() {
 
   assert(config.bootstrap_servers == "redpanda:9092");
   assert(config.consumer_group_id == "local-engine");
+  assert(config.checkpoint_store == EngineCheckpointStoreKind::S3);
   assert(config.checkpoint_directory == "tmp/checkpoints");
+  assert(config.s3_checkpoint.endpoint == "http://minio:9000");
+  assert(config.s3_checkpoint.bucket == "engine-checkpoints");
+  assert(config.s3_checkpoint.access_key == "access");
+  assert(config.s3_checkpoint.secret_key == "secret");
+  assert(config.s3_checkpoint.region == "local");
+  assert(config.s3_checkpoint.prefix == "blue");
   assert(config.poll_loop_limit == 7);
   assert(!config.once);
 }
@@ -148,14 +179,30 @@ void test_command_line_overrides_environment() {
   const EngineAppEnvironment environment{
       .bootstrap_servers = "env:9092",
       .consumer_group_id = "env-group",
+      .checkpoint_store = "file",
       .checkpoint_directory = "env/checkpoints",
+      .checkpoint_s3_endpoint = "http://env-minio:9000",
+      .checkpoint_s3_bucket = "env-bucket",
+      .checkpoint_s3_access_key = "env-access",
+      .checkpoint_s3_secret_key = "env-secret",
+      .checkpoint_s3_region = "env-region",
+      .checkpoint_s3_prefix = "env",
       .poll_loop_limit = "9",
   };
   const std::vector<std::string> args{
       "--bootstrap-servers=cli:9092",
       "--group-id",
       "cli-group",
+      "--checkpoint-store=s3",
       "--checkpoint-dir=cli/checkpoints",
+      "--checkpoint-s3-endpoint=http://cli-minio:9000",
+      "--checkpoint-s3-bucket",
+      "cli-bucket",
+      "--checkpoint-s3-access-key=cli-access",
+      "--checkpoint-s3-secret-key",
+      "cli-secret",
+      "--checkpoint-s3-region=cli-region",
+      "--checkpoint-s3-prefix=cli",
       "--once",
   };
 
@@ -163,7 +210,14 @@ void test_command_line_overrides_environment() {
 
   assert(config.bootstrap_servers == "cli:9092");
   assert(config.consumer_group_id == "cli-group");
+  assert(config.checkpoint_store == EngineCheckpointStoreKind::S3);
   assert(config.checkpoint_directory == "cli/checkpoints");
+  assert(config.s3_checkpoint.endpoint == "http://cli-minio:9000");
+  assert(config.s3_checkpoint.bucket == "cli-bucket");
+  assert(config.s3_checkpoint.access_key == "cli-access");
+  assert(config.s3_checkpoint.secret_key == "cli-secret");
+  assert(config.s3_checkpoint.region == "cli-region");
+  assert(config.s3_checkpoint.prefix == "cli");
   assert(config.poll_loop_limit == 1);
   assert(config.once);
 }
@@ -284,8 +338,13 @@ void test_help_is_reported() {
 
   const auto usage = engine_app_usage("engine_app");
   assert_contains(usage, "--bootstrap-servers");
+  assert_contains(usage, "--checkpoint-store");
+  assert_contains(usage, "default s3");
+  assert_contains(usage, "--checkpoint-s3-endpoint");
   assert_contains(usage, "--markets-config");
+  assert_contains(usage, "CEX_ENGINE_CHECKPOINT_STORE");
   assert_contains(usage, "CEX_ENGINE_CHECKPOINT_DIR");
+  assert_contains(usage, "CEX_ENGINE_CHECKPOINT_S3_BUCKET");
   assert_contains(usage, "CEX_ENGINE_MARKETS_CONFIG");
 }
 
@@ -310,13 +369,21 @@ void test_invalid_options_fail_clearly() {
   } catch (const std::invalid_argument& error) {
     assert_contains(error.what(), "unknown");
   }
+
+  try {
+    (void)parse_engine_app_config({"--checkpoint-store", "disk"});
+    assert(false);
+  } catch (const std::invalid_argument& error) {
+    assert_contains(error.what(), "s3 or file");
+  }
 }
 
 }  // namespace
 
 int main() {
   try {
-    test_defaults_are_local_friendly();
+    test_defaults_are_minio_friendly();
+    test_file_checkpoint_store_is_opt_in_fallback();
     test_environment_overrides_defaults();
     test_environment_markets_config_overrides_default_market();
     test_command_line_overrides_environment();

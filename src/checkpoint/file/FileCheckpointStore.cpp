@@ -1,3 +1,4 @@
+#include "checkpoint/CheckpointCodec.hpp"
 #include "checkpoint/file/FileCheckpointStore.hpp"
 
 #include <algorithm>
@@ -8,6 +9,7 @@
 #include <fstream>
 #include <limits>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -20,7 +22,6 @@ namespace cex::checkpoint {
 namespace {
 
 constexpr std::string_view kMagic = "cex.engine.checkpoint.file.v1";
-constexpr std::string_view kCheckpointExtension = ".checkpoint";
 
 class CheckpointParseError final : public std::runtime_error {
  public:
@@ -52,9 +53,9 @@ class CheckpointParseError final : public std::runtime_error {
 }
 
 [[nodiscard]] std::string filename_for_checkpoint_id(
-    const std::string& checkpoint_id) {
+    std::string_view checkpoint_id) {
   std::string filename;
-  filename.reserve(checkpoint_id.size() + kCheckpointExtension.size());
+  filename.reserve(checkpoint_id.size() + CheckpointFileExtension.size());
 
   for (const unsigned char value : checkpoint_id) {
     if (is_safe_filename_char(value)) {
@@ -70,7 +71,7 @@ class CheckpointParseError final : public std::runtime_error {
   if (filename.empty()) {
     filename = "checkpoint";
   }
-  filename.append(kCheckpointExtension);
+  filename.append(CheckpointFileExtension);
   return filename;
 }
 
@@ -1498,7 +1499,7 @@ class CheckpointReader {
     if (!it->is_regular_file(entry_error) || entry_error) {
       continue;
     }
-    if (it->path().extension().string() == kCheckpointExtension) {
+    if (it->path().extension().string() == CheckpointFileExtension) {
       candidates.push_back(it->path());
     }
   }
@@ -1517,6 +1518,36 @@ class CheckpointReader {
 
 }  // namespace
 
+std::string checkpoint_filename_for_id(std::string_view checkpoint_id) {
+  return filename_for_checkpoint_id(checkpoint_id);
+}
+
+std::string serialize_checkpoint(const EngineCheckpoint& checkpoint) {
+  std::ostringstream out;
+  write_checkpoint(out, checkpoint);
+  out.flush();
+  if (!out) {
+    throw std::runtime_error("failed to serialize checkpoint");
+  }
+  return out.str();
+}
+
+EngineCheckpoint deserialize_checkpoint(std::string_view text) {
+  std::string buffer(text);
+  std::istringstream in(buffer);
+  CheckpointReader reader(in);
+  return reader.read_checkpoint();
+}
+
+std::optional<EngineCheckpoint> try_deserialize_checkpoint(
+    std::string_view text) {
+  try {
+    return deserialize_checkpoint(text);
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+}
+
 FileCheckpointStore::FileCheckpointStore(std::filesystem::path directory)
     : directory_(std::move(directory)) {}
 
@@ -1528,7 +1559,7 @@ void FileCheckpointStore::save(EngineCheckpoint checkpoint) {
                              error.message());
   }
 
-  const auto filename = filename_for_checkpoint_id(checkpoint.checkpoint_id);
+  const auto filename = checkpoint_filename_for_id(checkpoint.checkpoint_id);
   const auto final_path = directory_ / filename;
   const auto temp_path = directory_ / (filename + ".tmp");
 
