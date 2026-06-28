@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/engine-smoke.sh [options]
+Usage: test-harness/smoke.sh [options]
 
 Builds the C++ engine with CMake, runs the offline engine_smoke CTest target,
 then attempts a local Redpanda-backed smoke against an engine_app process that
