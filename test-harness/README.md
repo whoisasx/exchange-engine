@@ -3,6 +3,17 @@
 This folder is the only manual test surface for the engine repo. The engine
 harness owns engine build/run/smoke commands; exchange owns shared local infra.
 
+```mermaid
+flowchart LR
+    exchangeInfra[exchange test-harness/infra.sh up] --> redpanda[(Redpanda)]
+    exchangeInfra --> minio[(MinIO)]
+    runner[run-exchange-e2e-engine.sh] --> build[Build engine_app]
+    build --> engine[Run engine_app]
+    redpanda --> engine
+    minio --> engine
+    engine --> exchangeSmoke[exchange test-harness/smoke.sh]
+```
+
 ## Get the Repos
 
 Use sibling checkouts so the exchange and engine harness scripts can be run from

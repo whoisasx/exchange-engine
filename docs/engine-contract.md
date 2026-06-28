@@ -25,6 +25,23 @@ All stream messages are JSON encoded with this shape:
 }
 ```
 
+```mermaid
+flowchart LR
+    wallet[exchange wallet] --> input[(engine.input)]
+    ingress[engine-ingress tools] --> input
+    input --> engine[engine_app]
+
+    engine --> replies[(engine.replies)]
+    engine --> events[(engine.events)]
+    engine --> checkpoint[(S3/file checkpoint)]
+
+    replies --> server[exchange server reply consumer]
+    events --> walletConsumer[exchange wallet]
+    events --> projector[exchange projector]
+    events --> ws[exchange websocket]
+    events --> timeseries[exchange timeseries]
+```
+
 ## Topics
 
 | Topic | Producer | Consumer | Purpose |
@@ -71,6 +88,23 @@ Broker committed offsets are not the recovery source of truth. They are operatio
 3. Commit the consumed input offset. The current rdkafka committer stores `input.offset + 1` as the Kafka resume offset.
 
 If checkpoint save fails, the engine must fail loudly and not commit the input offset. A crash after checkpoint save but before commit is recoverable because startup recovery seeks to the checkpoint `next_offset`. A crash after commit but before checkpoint is unsafe when startup relies on the consumer group position, so app startup must use checkpoint recovery and live processing must place checkpoint durability before broker commit.
+
+```mermaid
+sequenceDiagram
+    participant I as engine.input
+    participant E as engine_app
+    participant O as engine.replies/events
+    participant S as Checkpoint store
+    participant C as Broker offset commit
+
+    E->>I: Poll offset N
+    E->>E: Process into runtime state
+    E->>O: Publish replies/events
+    E->>S: Save checkpoint next_offset=N+1
+    E->>C: Commit resume offset N+1
+
+    Note over S,C: Checkpoint durability happens before broker commit.
+```
 
 ## Common Types
 
