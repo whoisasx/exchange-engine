@@ -1,23 +1,22 @@
 # Perpex Engine
 
-C++ matching and risk engine for Perpex. The engine consumes ordered inputs from
-Redpanda, applies matching/risk logic, publishes replies and durable events, and
-saves checkpoints for recovery.
+C++20 matching and risk engine for Perpex. It consumes ordered exchange inputs
+from Redpanda, applies deterministic matching and risk logic, publishes replies
+and durable events, and checkpoints state for recovery.
 
-The exchange server is a separate repo and process. It owns API, wallet checks,
-accounting, read models, and websocket fanout. The engine owns `engine.input`
-consumption, matching, risk state, checkpoints, and `engine.replies` /
-`engine.events` production.
+The exchange server is a separate process. Exchange owns API, wallet checks,
+accounting, read models, and websocket fanout. Engine owns `engine.input`,
+matching/risk state, checkpoints, and `engine.replies` / `engine.events`.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    exchange[exchange-server<br/>external process] --> input[(engine.input)]
+    exchange[exchange-server] --> input[(engine.input)]
     input --> app[engine_app]
 
     app --> recovery[RecoveryCoordinator]
-    recovery --> store[(Checkpoint Store<br/>S3/MinIO or file)]
+    recovery --> checkpoint[(S3/MinIO or file checkpoint)]
     recovery --> input
 
     app --> parser[EngineInputParser]
@@ -27,14 +26,14 @@ flowchart LR
 
     outbox --> replies[(engine.replies)]
     outbox --> events[(engine.events)]
-    app --> store
-    app --> commits[Input Offset Commit]
+    app --> checkpoint
+    app --> commit[Offset commit]
 
     replies --> exchange
     events --> exchange
 ```
 
-## Processing Order
+## Flow
 
 ```mermaid
 sequenceDiagram
@@ -47,141 +46,52 @@ sequenceDiagram
 
     A->>RP: Poll one input
     RP-->>A: Consumed record
-    A->>R: Parse and process
-    R-->>A: Replies/events plus state changes
+    A->>R: Parse, validate, match, update risk
+    R-->>A: Replies and events
     A->>O: Publish output records
     O-->>RP: engine.replies / engine.events
     A->>S: Save checkpoint with next_offset
     A->>C: Commit consumed offset
 ```
 
-The checkpoint is saved before the input offset is committed. If checkpoint
-save fails, the engine fails loudly and does not commit the offset.
+Checkpoints are saved before input offsets are committed. If checkpoint save
+fails, the engine fails loudly and does not commit the offset.
 
-## Repo Layout
+## Core Features
+
+- Price-time priority matching with deterministic orderbook behavior.
+- Runtime validation for place, cancel, liquidation, mark price, and funding
+  inputs.
+- JSON stream contract shared with the exchange repo.
+- Redpanda app boundary for `engine.input`, `engine.replies`, and
+  `engine.events`.
+- File and S3-compatible checkpoint stores for recovery.
+- Focused benchmark harness for core, runtime, and broker-loop measurements.
+
+## Project Structure
 
 ```text
-include/core       Core orderbook, matching, fixed point, and risk types
-src/core           Core engine implementation
-include/runtime    Input parsing, output translation, runtime orchestration
-src/runtime        Runtime implementation
-include/broker     Broker interfaces and Redpanda app boundary
-src/broker         Redpanda app processing wrapper
-include/checkpoint Checkpoint interfaces and data model
-src/checkpoint     File and S3 checkpoint stores
-include/recovery   Checkpoint recovery and replay
-src/recovery       Recovery implementation
-src/app            engine_app config and executable entrypoint
-docs               Stream contract and JSON fixtures
-bench              Benchmark binaries and workload generators
-bench-harness      Benchmark build/run scripts
-tests              Unit, fixture, recovery, broker, and smoke tests
-test-harness       Manual smoke and exchange e2e scripts
+include/core        Public core orderbook, matching, fixed point, and risk types
+src/core            Core engine implementation
+include/runtime     Runtime parser, output, and orchestration interfaces
+src/runtime         Runtime implementation
+include/broker      Broker interfaces and Redpanda app boundary
+src/broker          Redpanda processing wrapper
+include/checkpoint  Checkpoint interfaces and data model
+src/checkpoint      File and S3 checkpoint stores
+include/recovery    Checkpoint recovery interfaces
+src/recovery        Recovery implementation
+src/app             engine_app config and executable entrypoint
+bench               Benchmark binaries and workload generators
+bench-harness       Benchmark scripts
+test-harness        Manual smoke and exchange e2e scripts
+docs                Protocol, local development, and configuration docs
+tests               Unit, fixture, recovery, broker, and smoke tests
 ```
 
-## Prerequisites
+## Quick Start
 
-- CMake 3.20+
-- C++20 compiler
-- libcurl
-- librdkafka++ for `engine_app`
-- Docker/Redpanda only when running stream-backed tests
-
-On macOS with Homebrew:
-
-```sh
-brew install cmake curl librdkafka
-```
-
-## Build
-
-```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_STANDARD=20
-cmake --build build --parallel
-```
-
-Build only `engine_app`:
-
-```sh
-cmake --build build --target engine_app --parallel
-```
-
-## Run Tests
-
-Offline engine smoke:
-
-```sh
-test-harness/smoke.sh --skip-redpanda
-```
-
-All CTest tests after a build:
-
-```sh
-ctest --test-dir build --output-on-failure
-```
-
-## Run Benchmarks
-
-Run a focused core matching benchmark:
-
-```sh
-bench-harness/run-core.sh --scenario mixed --commands 100000 --warmup 5000
-```
-
-Run the full local benchmark matrix:
-
-```sh
-bench-harness/run-all.sh
-```
-
-Measure JSON output serialization cost for the same runtime workload:
-
-```sh
-bench-harness/run-runtime.sh --scenario mixed --commands 100000 --warmup 5000
-bench-harness/run-runtime.sh --scenario mixed --commands 100000 --warmup 5000 \
-  --include-output-serialization
-```
-
-Benchmark reports are JSON with throughput, output byte counts, and latency
-percentiles including `p50`, `p90`, `p95`, `p99`, `p99.9`, and max.
-
-Redpanda-backed smoke requires an already-running `engine_app` and reachable
-Redpanda:
-
-```sh
-test-harness/smoke.sh --require-redpanda
-```
-
-## Storage Containers
-
-The engine e2e flow uses the storage containers owned by the exchange repo
-harness:
-
-```sh
-cd ~/perpex/exchange
-test-harness/infra.sh up
-```
-
-This starts and prepares:
-
-| Container | Purpose | Local endpoint |
-|---|---|---|
-| Postgres | Main exchange DB: users, balances, orders, projector rows, ledger rows, wallet outbox | `postgres://postgres:postgres@127.0.0.1:55432/exchange` |
-| Redpanda | Streams and queues: `wallet.commands`, `wallet.events`, `engine.input`, `engine.replies`, `engine.events` | `127.0.0.1:19092` |
-| TimescaleDB | Time-series DB for trades and candles | `postgres://postgres:postgres@127.0.0.1:55433/exchange_timeseries` |
-| MinIO | S3-compatible object storage for engine checkpoints | `http://127.0.0.1:59000` |
-
-`infra.sh up` also creates Redpanda topics, creates the Timescale extension,
-creates the MinIO bucket `exchange-checkpoints`, and clears old checkpoint
-objects. Stop and remove local infra with:
-
-```sh
-test-harness/infra.sh down
-```
-
-## Run With Exchange E2E
-
-Use sibling repo checkouts:
+Use sibling checkouts:
 
 ```sh
 mkdir -p ~/perpex
@@ -190,64 +100,71 @@ git clone git@github.com:whoisasx/exchange-engine.git engine
 git clone git@github.com:whoisasx/exchange-server.git exchange
 ```
 
-Start exchange infra:
+Start exchange-owned infra:
 
 ```sh
-cd exchange
+cd ~/perpex/exchange
 test-harness/infra.sh up
 ```
 
-Start the engine:
+Run the engine:
 
 ```sh
-cd ../engine
+cd ~/perpex/engine
 test-harness/run-exchange-e2e-engine.sh
 ```
 
-Run the exchange smoke in another terminal:
+In another terminal, run the exchange smoke:
 
 ```sh
-cd ../exchange
+cd ~/perpex/exchange
 test-harness/smoke.sh
 ```
 
-Expected exchange output:
+Expected result:
 
 ```text
 e2e smoke passed
 e2e smoke complete
 ```
 
-Stop `engine_app` with `Ctrl-C`, then stop exchange infra:
+## Benchmarks
 
-```sh
-cd ../exchange
-test-harness/infra.sh down
+The engine benchmark harness separates matching cost from runtime parsing and
+broker-loop overhead.
+
+```mermaid
+flowchart LR
+    scripts[bench-harness] --> core[core benchmark]
+    scripts --> runtime[runtime benchmark]
+    scripts --> broker[broker-loop benchmark]
+    core --> metrics[throughput + p50/p99]
+    runtime --> metrics
+    broker --> metrics
 ```
 
-## Configuration
-
-`engine_app` accepts CLI flags and matching `CEX_ENGINE_*` environment
-variables. The most common settings are:
-
-- `CEX_ENGINE_BOOTSTRAP_SERVERS`: Redpanda/Kafka bootstrap servers
-- `CEX_ENGINE_GROUP_ID`: consumer group id
-- `CEX_ENGINE_CHECKPOINT_STORE`: `s3` or `file`
-- `CEX_ENGINE_CHECKPOINT_S3_ENDPOINT`: S3/MinIO endpoint
-- `CEX_ENGINE_CHECKPOINT_S3_BUCKET`: checkpoint bucket
-- `CEX_ENGINE_MARKETS_CONFIG`: market config file
-
-For the exchange e2e harness, use:
+Run the full local matrix:
 
 ```sh
-test-harness/run-exchange-e2e-engine.sh
+bench-harness/run-all.sh
 ```
 
-It builds `engine_app` and runs it against exchange harness Redpanda and MinIO
-with `test-harness/exchange-e2e-markets.conf`.
+See [bench-harness/README.md](bench-harness/README.md) for scenarios, output
+schema, and tunable environment variables.
 
-## More Detail
+## Tech Stack
 
+- Language: C++20
+- Build: CMake
+- Streams: Redpanda / Kafka protocol through `librdkafka++`
+- Checkpoints: file store or S3-compatible object storage
+- HTTP/object calls: libcurl
+- Tests: CTest plus JSON fixture tests
+
+## Documentation
+
+- [Local development](docs/local-development.md)
+- [Configuration](docs/configuration.md)
 - [Test harness](test-harness/README.md)
 - [Benchmark harness](bench-harness/README.md)
 - [Engine stream contract](docs/engine-contract.md)
