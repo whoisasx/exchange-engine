@@ -11,3 +11,5 @@ planning/
 .vscode
 .DS_store
 build/
+build-bench/
+bench-results/

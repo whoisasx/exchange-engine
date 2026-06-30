@@ -73,6 +73,8 @@ include/recovery   Checkpoint recovery and replay
 src/recovery       Recovery implementation
 src/app            engine_app config and executable entrypoint
 docs               Stream contract and JSON fixtures
+bench              Benchmark binaries and workload generators
+bench-harness      Benchmark build/run scripts
 tests              Unit, fixture, recovery, broker, and smoke tests
 test-harness       Manual smoke and exchange e2e scripts
 ```
@@ -117,6 +119,31 @@ All CTest tests after a build:
 ```sh
 ctest --test-dir build --output-on-failure
 ```
+
+## Run Benchmarks
+
+Run a focused core matching benchmark:
+
+```sh
+bench-harness/run-core.sh --scenario mixed --commands 100000 --warmup 5000
+```
+
+Run the full local benchmark matrix:
+
+```sh
+bench-harness/run-all.sh
+```
+
+Measure JSON output serialization cost for the same runtime workload:
+
+```sh
+bench-harness/run-runtime.sh --scenario mixed --commands 100000 --warmup 5000
+bench-harness/run-runtime.sh --scenario mixed --commands 100000 --warmup 5000 \
+  --include-output-serialization
+```
+
+Benchmark reports are JSON with throughput, output byte counts, and latency
+percentiles including `p50`, `p90`, `p95`, `p99`, `p99.9`, and max.
 
 Redpanda-backed smoke requires an already-running `engine_app` and reachable
 Redpanda:
@@ -195,5 +222,6 @@ with `test-harness/exchange-e2e-markets.conf`.
 ## More Detail
 
 - [Test harness](test-harness/README.md)
+- [Benchmark harness](bench-harness/README.md)
 - [Engine stream contract](docs/engine-contract.md)
 - [Protocol fixtures](docs/examples/README.md)

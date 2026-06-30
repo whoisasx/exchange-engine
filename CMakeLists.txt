@@ -198,6 +198,10 @@ option(ENGINE_ENABLE_RDKAFKA
   "Build the concrete librdkafka-backed broker implementation"
   ${ENGINE_RDKAFKA_FOUND}
 )
+option(ENGINE_BUILD_BENCHMARKS
+  "Build local benchmark executables"
+  OFF
+)
 
 if(ENGINE_ENABLE_RDKAFKA AND ENGINE_RDKAFKA_FOUND)
   add_library(RdKafka::rdkafka UNKNOWN IMPORTED)
@@ -260,6 +264,50 @@ else()
 endif()
 
 include(CTest)
+
+if(ENGINE_BUILD_BENCHMARKS)
+  add_executable(engine_core_benchmark
+    bench/core_benchmark.cpp
+  )
+
+  target_link_libraries(engine_core_benchmark
+    PRIVATE
+      cex::core_engine
+  )
+
+  target_include_directories(engine_core_benchmark
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/bench
+  )
+
+  add_executable(engine_runtime_benchmark
+    bench/runtime_benchmark.cpp
+  )
+
+  target_link_libraries(engine_runtime_benchmark
+    PRIVATE
+      cex::engine_runtime
+  )
+
+  target_include_directories(engine_runtime_benchmark
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/bench
+  )
+
+  add_executable(engine_broker_loop_benchmark
+    bench/broker_loop_benchmark.cpp
+  )
+
+  target_link_libraries(engine_broker_loop_benchmark
+    PRIVATE
+      cex::engine_broker
+  )
+
+  target_include_directories(engine_broker_loop_benchmark
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/bench
+  )
+endif()
 
 if(BUILD_TESTING)
   add_executable(adapter_tests
