@@ -51,6 +51,17 @@ test-harness/run-exchange-e2e-engine.sh
 
 This script builds `engine_app` and runs it against the exchange harness
 Redpanda and MinIO endpoints with `test-harness/exchange-e2e-markets.conf`.
+That config maps one market to one `engine.input` partition:
+
+```text
+SOL-PERP market_id=1 input_partition=4
+ETH-PERP market_id=2 input_partition=5
+```
+
+The exchange harness creates `engine.input` with multiple partitions and
+publishes engine inputs with `market_id` as the record key. The default local
+topic has eight partitions, so the sample config uses the exchange publisher's
+stable partition results for keys `"1"` and `"2"`.
 
 In another terminal, run the exchange smoke:
 

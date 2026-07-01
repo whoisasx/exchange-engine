@@ -1199,6 +1199,7 @@ EngineRuntime::EngineRuntime(EngineRuntimeConfig config)
     : market_sequences_(config.first_public_sequence),
       config_(std::move(config)),
       clock_(config_.clock ? config_.clock : EngineRuntimeClock{system_timestamp_ms}) {
+  core_.sequenceGenerator.nextTradeId = config_.first_trade_id;
   for (const auto& symbol : config_.symbols) {
     core_.add_symbol(symbol);
   }

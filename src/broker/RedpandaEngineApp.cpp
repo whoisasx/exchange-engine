@@ -1,11 +1,15 @@
 #include "broker/RedpandaEngineApp.hpp"
 
+#include "runtime/EngineInputParser.hpp"
+
+#include <algorithm>
 #include <exception>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 
 namespace cex::broker {
 namespace {
@@ -54,6 +58,22 @@ class ProducerBackedPublisher final : public runtime::IEnginePublisher {
   };
 }
 
+[[nodiscard]] cex::adapter::MarketId market_id_for(
+    const runtime::ParsedEngineInput& input) {
+  return std::visit(
+      [](const auto& command) -> cex::adapter::MarketId {
+        return command.market_id;
+      },
+      input.value);
+}
+
+[[nodiscard]] bool contains_market(
+    const std::vector<cex::adapter::MarketId>& market_ids,
+    cex::adapter::MarketId market_id) {
+  return std::find(market_ids.begin(), market_ids.end(), market_id) !=
+         market_ids.end();
+}
+
 }  // namespace
 
 RedpandaEngineApp::RedpandaEngineApp(IEngineInputConsumer& consumer,
@@ -65,7 +85,7 @@ RedpandaEngineApp::RedpandaEngineApp(IEngineInputConsumer& consumer,
                         producer,
                         committer,
                         runtime,
-                        EngineInputTopic,
+                        EngineInputGuardConfig{.topic = EngineInputTopic},
                         std::move(pre_commit_hook)) {}
 
 RedpandaEngineApp::RedpandaEngineApp(IEngineInputConsumer& consumer,
@@ -74,14 +94,36 @@ RedpandaEngineApp::RedpandaEngineApp(IEngineInputConsumer& consumer,
                                      runtime::EngineRuntime& runtime,
                                      std::string expected_input_topic,
                                      EnginePreCommitHook pre_commit_hook)
+    : RedpandaEngineApp(
+          consumer,
+          producer,
+          committer,
+          runtime,
+          EngineInputGuardConfig{.topic = std::move(expected_input_topic)},
+          std::move(pre_commit_hook)) {}
+
+RedpandaEngineApp::RedpandaEngineApp(IEngineInputConsumer& consumer,
+                                     IEngineRecordProducer& producer,
+                                     IEngineOffsetCommitter& committer,
+                                     runtime::EngineRuntime& runtime,
+                                     EngineInputGuardConfig guard_config,
+                                     EnginePreCommitHook pre_commit_hook)
     : consumer_(consumer),
       producer_(producer),
       committer_(committer),
       runtime_(runtime),
-      expected_input_topic_(std::move(expected_input_topic)),
+      guard_config_(std::move(guard_config)),
       pre_commit_hook_(std::move(pre_commit_hook)) {
-  if (expected_input_topic_.empty()) {
+  if (guard_config_.topic.empty()) {
     throw std::invalid_argument("engine input topic must not be empty");
+  }
+  if (guard_config_.partition.has_value() && *guard_config_.partition < 0) {
+    throw std::invalid_argument("engine input partition must not be negative");
+  }
+  for (const auto market_id : guard_config_.market_ids) {
+    if (market_id <= 0) {
+      throw std::invalid_argument("engine input market ids must be positive");
+    }
   }
 }
 
@@ -102,11 +144,40 @@ EngineBrokerAppResult RedpandaEngineApp::consume(
       .source = record,
   };
 
-  if (record.topic != expected_input_topic_) {
+  if (record.topic != guard_config_.topic) {
     result.status = EngineBrokerAppStatus::RejectedInputTopic;
-    result.error = "expected input topic " + expected_input_topic_ +
+    result.error = "expected input topic " + guard_config_.topic +
                    ", received " + record.topic;
     return result;
+  }
+
+  if (guard_config_.partition.has_value() &&
+      record.partition != *guard_config_.partition) {
+    result.status = EngineBrokerAppStatus::RejectedInputPartition;
+    result.error =
+        "expected input partition " +
+        std::to_string(*guard_config_.partition) + ", received " +
+        std::to_string(record.partition);
+    return result;
+  }
+
+  if (!guard_config_.market_ids.empty()) {
+    cex::adapter::MarketId market_id{0};
+    try {
+      runtime::EngineInputParser parser;
+      market_id = market_id_for(parser.parse(record.value));
+    } catch (const std::exception& error) {
+      result.status = EngineBrokerAppStatus::ProcessingFailed;
+      result.error = error.what();
+      return result;
+    }
+
+    if (!contains_market(guard_config_.market_ids, market_id)) {
+      result.status = EngineBrokerAppStatus::RejectedInputMarket;
+      result.error = "market_id " + std::to_string(market_id) +
+                     " is not owned by this engine worker";
+      return result;
+    }
   }
 
   runtime::EngineProcessResult process_result;

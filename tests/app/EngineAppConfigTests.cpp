@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -36,38 +37,45 @@ std::filesystem::path write_config_file(std::string_view name,
 
 std::string single_market_config_text(int market_id,
                                       std::string_view market_name,
-                                      bool trading_enabled) {
-  return "[[market]]\n"
-         "market_id = " +
-         std::to_string(market_id) +
-         "\n"
-         "market_name = " +
-         std::string(market_name) +
-         "\n"
-         "tick_size = 5\n"
-         "lot_size = 2\n"
-         "min_quantity = 2\n"
-         "max_quantity = 2000\n"
-         "min_price = 10\n"
-         "max_price = 200000\n"
-         "ring_capacity_ticks = 2048\n"
-         "threshold_percentage = 15\n"
-         "initial_base_tick = -20\n"
-         "price_scale = 2\n"
-         "quantity_scale = 3\n"
-         "maker_fee_rate = 4\n"
-         "taker_fee_rate = 6\n"
-         "trading_enabled = " +
-         (trading_enabled ? std::string("true") : std::string("false")) +
-         "\n";
+                                      bool trading_enabled,
+                                      std::optional<int> input_partition =
+                                          std::optional<int>{0}) {
+  std::string text = "[[market]]\n"
+                     "market_id = " +
+                     std::to_string(market_id) +
+                     "\n"
+                     "market_name = " +
+                     std::string(market_name) +
+                     "\n";
+  if (input_partition.has_value()) {
+    text += "input_partition = " + std::to_string(*input_partition) + "\n";
+  }
+  text += "tick_size = 5\n"
+          "lot_size = 2\n"
+          "min_quantity = 2\n"
+          "max_quantity = 2000\n"
+          "min_price = 10\n"
+          "max_price = 200000\n"
+          "ring_capacity_ticks = 2048\n"
+          "threshold_percentage = 15\n"
+          "initial_base_tick = -20\n"
+          "price_scale = 2\n"
+          "quantity_scale = 3\n"
+          "maker_fee_rate = 4\n"
+          "taker_fee_rate = 6\n"
+          "trading_enabled = ";
+  text += trading_enabled ? "true\n" : "false\n";
+  return text;
 }
 
 void assert_custom_market(const EngineMarketConfig& market,
                           cex::adapter::MarketId market_id,
                           const std::string& market_name,
-                          bool trading_enabled) {
+                          bool trading_enabled,
+                          int input_partition = 0) {
   assert(market.market_id == market_id);
   assert(market.market_name == market_name);
+  assert(market.input_partition == input_partition);
 
   const auto& symbol = market.symbol_config;
   assert(symbol.symbolId == static_cast<SymbolId>(market_id));
@@ -112,6 +120,7 @@ void test_defaults_are_minio_friendly() {
   const auto& market = config.markets.front();
   assert(market.market_id == 1);
   assert(market.market_name == "SOL-PERP");
+  assert(market.input_partition == 0);
   assert(market.symbol_config.symbolId == 1);
   assert(market.symbol_config.tickSize.ticks() == 1);
   assert(market.symbol_config.lotSize.lots() == 1);
@@ -242,6 +251,19 @@ void test_command_line_markets_config_overrides_environment() {
   assert_custom_market(config.markets.front(), 4, "CLI-PERP", false);
 }
 
+void test_parsed_market_input_partition() {
+  const auto path =
+      write_config_file("partition.markets.conf",
+                        single_market_config_text(
+                            8, "AVAX-PERP", true, std::optional<int>{3}));
+
+  const auto config =
+      parse_engine_app_config({"--markets-config", path.string()}).config;
+
+  assert(config.markets.size() == 1);
+  assert_custom_market(config.markets.front(), 8, "AVAX-PERP", true, 3);
+}
+
 void test_valid_multi_market_file() {
   const auto path = write_config_file(
       "multi.markets.conf",
@@ -250,6 +272,7 @@ void test_valid_multi_market_file() {
       "[[market]]\n"
       "market_id = 1\n"
       "market_name = SOL-PERP\n"
+      "input_partition = 0\n"
       "tick_size = 5\n"
       "lot_size = 2\n"
       "min_quantity = 2\n"
@@ -268,6 +291,7 @@ void test_valid_multi_market_file() {
       "[[market]]\n"
       "market_id = 2\n"
       "market_name = BTC-PERP\n"
+      "input_partition = 1\n"
       "tick_size = 10\n"
       "lot_size = 1\n"
       "min_quantity = 1\n"
@@ -292,6 +316,7 @@ void test_valid_multi_market_file() {
   const auto& btc = config.markets[1];
   assert(btc.market_id == 2);
   assert(btc.market_name == "BTC-PERP");
+  assert(btc.input_partition == 1);
   assert(btc.symbol_config.symbolId == 2);
   assert(btc.symbol_config.tickSize.ticks() == 10);
   assert(btc.symbol_config.lotSize.lots() == 1);
@@ -314,13 +339,57 @@ void test_invalid_markets_config_file_fails_clearly() {
       "invalid.markets.conf",
       "[[market]]\n"
       "market_id = 1\n"
-      "market_name = BROKEN-PERP\n");
+      "market_name = BROKEN-PERP\n"
+      "input_partition = 0\n");
 
   try {
     (void)parse_engine_app_config({"--markets-config", path.string()});
     assert(false);
   } catch (const std::invalid_argument& error) {
     assert_contains(error.what(), "missing required key tick_size");
+  }
+}
+
+void test_missing_input_partition_fails_clearly() {
+  const auto path =
+      write_config_file("missing-input-partition.markets.conf",
+                        single_market_config_text(
+                            1, "SOL-PERP", true, std::nullopt));
+
+  try {
+    (void)parse_engine_app_config({"--markets-config", path.string()});
+    assert(false);
+  } catch (const std::invalid_argument& error) {
+    assert_contains(error.what(), "missing required key input_partition");
+  }
+}
+
+void test_negative_input_partition_fails_clearly() {
+  const auto path =
+      write_config_file("negative-input-partition.markets.conf",
+                        single_market_config_text(
+                            1, "SOL-PERP", true, std::optional<int>{-1}));
+
+  try {
+    (void)parse_engine_app_config({"--markets-config", path.string()});
+    assert(false);
+  } catch (const std::invalid_argument& error) {
+    assert_contains(error.what(), "input_partition must not be negative");
+  }
+}
+
+void test_duplicate_input_partition_fails_clearly() {
+  const auto path =
+      write_config_file("duplicate-input-partition.markets.conf",
+                        single_market_config_text(1, "SOL-PERP", true) +
+                            "\n" +
+                            single_market_config_text(2, "BTC-PERP", false));
+
+  try {
+    (void)parse_engine_app_config({"--markets-config", path.string()});
+    assert(false);
+  } catch (const std::invalid_argument& error) {
+    assert_contains(error.what(), "duplicate input_partition 0");
   }
 }
 
@@ -342,6 +411,7 @@ void test_help_is_reported() {
   assert_contains(usage, "default s3");
   assert_contains(usage, "--checkpoint-s3-endpoint");
   assert_contains(usage, "--markets-config");
+  assert_contains(usage, "input_partition");
   assert_contains(usage, "CEX_ENGINE_CHECKPOINT_STORE");
   assert_contains(usage, "CEX_ENGINE_CHECKPOINT_DIR");
   assert_contains(usage, "CEX_ENGINE_CHECKPOINT_S3_BUCKET");
@@ -388,8 +458,12 @@ int main() {
     test_environment_markets_config_overrides_default_market();
     test_command_line_overrides_environment();
     test_command_line_markets_config_overrides_environment();
+    test_parsed_market_input_partition();
     test_valid_multi_market_file();
     test_invalid_markets_config_file_fails_clearly();
+    test_missing_input_partition_fails_clearly();
+    test_negative_input_partition_fails_clearly();
+    test_duplicate_input_partition_fails_clearly();
     test_poll_limit_option();
     test_help_is_reported();
     test_invalid_options_fail_clearly();

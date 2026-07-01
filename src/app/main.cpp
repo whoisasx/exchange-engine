@@ -10,16 +10,19 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <atomic>
 #include <exception>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -34,6 +37,10 @@ namespace {
       return "Processed";
     case cex::broker::EngineBrokerAppStatus::RejectedInputTopic:
       return "RejectedInputTopic";
+    case cex::broker::EngineBrokerAppStatus::RejectedInputPartition:
+      return "RejectedInputPartition";
+    case cex::broker::EngineBrokerAppStatus::RejectedInputMarket:
+      return "RejectedInputMarket";
     case cex::broker::EngineBrokerAppStatus::PublishFailed:
       return "PublishFailed";
     case cex::broker::EngineBrokerAppStatus::CheckpointFailed:
@@ -56,6 +63,8 @@ namespace {
       return "Recovered";
     case cex::recovery::RecoveryStatus::Replayed:
       return "Replayed";
+    case cex::recovery::RecoveryStatus::SourceMismatch:
+      return "SourceMismatch";
     case cex::recovery::RecoveryStatus::CheckpointLoadFailed:
       return "CheckpointLoadFailed";
     case cex::recovery::RecoveryStatus::WatermarkUnavailable:
@@ -123,15 +132,41 @@ namespace {
   };
 }
 
+[[nodiscard]] std::string checkpoint_scope_for(std::string_view topic,
+                                               std::int32_t partition) {
+  std::ostringstream output;
+  output << safe_checkpoint_topic(topic) << "-p" << std::setw(10)
+         << std::setfill('0') << partition;
+  return output.str();
+}
+
+[[nodiscard]] std::string append_s3_prefix(std::string base,
+                                           std::string scope) {
+  if (base.empty()) {
+    return scope;
+  }
+  if (base.back() == '/') {
+    return base + scope;
+  }
+  return base + "/" + scope;
+}
+
 [[nodiscard]] std::unique_ptr<cex::checkpoint::ICheckpointStore>
-make_checkpoint_store(const cex::engine_app::EngineAppConfig& config) {
+make_checkpoint_store(const cex::engine_app::EngineAppConfig& config,
+                      std::string_view topic,
+                      std::int32_t partition) {
+  const auto scope = checkpoint_scope_for(topic, partition);
   switch (config.checkpoint_store) {
-    case cex::engine_app::EngineCheckpointStoreKind::File:
+    case cex::engine_app::EngineCheckpointStoreKind::File: {
       return std::make_unique<cex::checkpoint::FileCheckpointStore>(
-          config.checkpoint_directory);
-    case cex::engine_app::EngineCheckpointStoreKind::S3:
+          config.checkpoint_directory / scope);
+    }
+    case cex::engine_app::EngineCheckpointStoreKind::S3: {
+      auto s3_config = s3_checkpoint_config(config.s3_checkpoint);
+      s3_config.prefix = append_s3_prefix(std::move(s3_config.prefix), scope);
       return std::make_unique<cex::checkpoint::S3CheckpointStore>(
-          s3_checkpoint_config(config.s3_checkpoint));
+          std::move(s3_config));
+    }
   }
   throw std::invalid_argument("unknown checkpoint store kind");
 }
@@ -303,7 +338,8 @@ void fail_if_recovery_incomplete(
 
 [[nodiscard]] cex::checkpoint::CheckpointSourcePosition
 startup_checkpoint_position(const cex::recovery::RecoveryResult& result,
-                            std::string fallback_topic) {
+                            std::string fallback_topic,
+                            std::int32_t fallback_partition) {
   if (result.source_position.has_value()) {
     return cex::checkpoint::CheckpointSourcePosition{
         .topic = result.source_position->topic,
@@ -314,7 +350,7 @@ startup_checkpoint_position(const cex::recovery::RecoveryResult& result,
 
   return cex::checkpoint::CheckpointSourcePosition{
       .topic = std::move(fallback_topic),
-      .partition = 0,
+      .partition = fallback_partition,
       .next_offset = result.next_offset,
   };
 }
@@ -324,6 +360,7 @@ void run_startup_automatic_liquidation_scan(
     cex::broker::RedpandaEngineApp& app,
     const cex::recovery::RecoveryResult& recovery_result,
     const std::string& fallback_input_topic,
+    std::int32_t fallback_input_partition,
     cex::checkpoint::EngineCheckpointManager& checkpoint_manager,
     cex::checkpoint::ICheckpointStore& checkpoint_store) {
   auto process_result =
@@ -340,7 +377,8 @@ void run_startup_automatic_liquidation_scan(
   }
 
   const auto checkpoint_position =
-      startup_checkpoint_position(recovery_result, fallback_input_topic);
+      startup_checkpoint_position(
+          recovery_result, fallback_input_topic, fallback_input_partition);
   if (auto error = save_checkpoint_for_source(checkpoint_position,
                                               runtime,
                                               checkpoint_manager,
@@ -352,6 +390,138 @@ void run_startup_automatic_liquidation_scan(
 
   std::cerr << "startup automatic liquidation scan published "
             << publish_result.published << " records\n";
+}
+
+[[nodiscard]] TradeId first_trade_id_for_market(
+    cex::adapter::MarketId market_id) {
+  constexpr TradeId TradeIdNamespaceSize = 1'000'000'000'000ULL;
+  if (market_id <= 0) {
+    throw std::invalid_argument("market_id must be positive for trade id seed");
+  }
+  const auto market = static_cast<TradeId>(market_id);
+  if (market >
+      (std::numeric_limits<TradeId>::max() - 1) / TradeIdNamespaceSize) {
+    throw std::invalid_argument("market_id is too large for trade id seed");
+  }
+  return market * TradeIdNamespaceSize + 1;
+}
+
+void run_engine_partition_worker(
+    const cex::engine_app::EngineAppConfig& config,
+    cex::engine_app::EngineMarketConfig market,
+    std::atomic_bool& stop_requested) {
+  std::cerr << "starting engine worker market_id=" << market.market_id
+            << " market_name=" << market.market_name
+            << " input_partition=" << market.input_partition << '\n';
+
+  cex::runtime::EngineRuntime runtime(cex::runtime::EngineRuntimeConfig{
+      .symbols = {market.symbol_config},
+      .first_public_sequence = 1,
+      .first_trade_id = first_trade_id_for_market(market.market_id),
+  });
+
+  auto checkpoint_store =
+      make_checkpoint_store(config, config.input_topic, market.input_partition);
+  cex::checkpoint::EngineCheckpointManager checkpoint_manager;
+
+  cex::broker::RdKafkaConsumerConfig consumer_config{
+      .bootstrap_servers = config.bootstrap_servers,
+      .group_id = config.consumer_group_id,
+      .topics = {},
+      .assigned_partitions =
+          {cex::broker::RdKafkaAssignedPartition{
+              .topic = config.input_topic,
+              .partition = market.input_partition,
+              .offset = 0,
+          }},
+      .client_id = "engine-app-input-consumer-p" +
+                   std::to_string(market.input_partition),
+  };
+
+  cex::broker::RdKafkaProducerConfig producer_config{
+      .bootstrap_servers = config.bootstrap_servers,
+      .client_id = "engine-app-record-producer-p" +
+                   std::to_string(market.input_partition),
+  };
+
+  cex::broker::RdKafkaEngineInputConsumer consumer(consumer_config);
+  cex::recovery::RecoveryCoordinator recovery_coordinator(
+      *checkpoint_store,
+      consumer,
+      runtime,
+      checkpoint_manager,
+      cex::recovery::RecoverySource{
+          .topic = config.input_topic,
+          .partition = market.input_partition,
+      });
+  const auto recovery_result = recovery_coordinator.recover_and_replay();
+  log_recovery_result(recovery_result, config);
+  fail_if_recovery_incomplete(recovery_result);
+
+  cex::broker::RdKafkaEngineRecordProducer producer(producer_config);
+  cex::broker::RedpandaEngineApp app(
+      consumer,
+      producer,
+      consumer,
+      runtime,
+      cex::broker::EngineInputGuardConfig{
+          .topic = config.input_topic,
+          .partition = market.input_partition,
+          .market_ids = {market.market_id},
+      },
+      [&](const cex::broker::ConsumedRecord& source,
+          const cex::runtime::EngineRuntime& checkpoint_runtime) {
+        return save_checkpoint_for_source(source,
+                                          checkpoint_runtime,
+                                          checkpoint_manager,
+                                          *checkpoint_store);
+      });
+
+  run_startup_automatic_liquidation_scan(runtime,
+                                         app,
+                                         recovery_result,
+                                         config.input_topic,
+                                         market.input_partition,
+                                         checkpoint_manager,
+                                         *checkpoint_store);
+
+  std::uint64_t poll_count{0};
+  while (!stop_requested.load() &&
+         (!config.poll_loop_limit.has_value() ||
+          poll_count < *config.poll_loop_limit)) {
+    ++poll_count;
+    const auto result = app.poll_once();
+    if (!result.ok()) {
+      std::ostringstream error;
+      error << "engine worker market_id=" << market.market_id
+            << " input_partition=" << market.input_partition
+            << " poll failed status=" << status_name(result.status);
+      if (!result.error.empty()) {
+        error << " error=" << result.error;
+      }
+      throw std::runtime_error(error.str());
+    }
+
+    if (result.status == cex::broker::EngineBrokerAppStatus::NoRecord) {
+      if (config.poll_loop_limit.has_value()) {
+        std::cerr << "worker market_id=" << market.market_id
+                  << " partition=" << market.input_partition << " poll "
+                  << poll_count << ": no record\n";
+      }
+      continue;
+    }
+
+    std::cerr << "worker market_id=" << market.market_id
+              << " partition=" << market.input_partition << " poll "
+              << poll_count << ": processed";
+    if (result.source.has_value()) {
+      std::cerr << " " << result.source->topic << '['
+                << result.source->partition << "] offset="
+                << result.source->offset;
+    }
+    log_trace_summary(result.trace);
+    std::cerr << '\n';
+  }
 }
 
 }  // namespace
@@ -377,85 +547,41 @@ int main(int argc, char* argv[]) {
               << config.events_topic << ' '
               << checkpoint_store_summary(config) << '\n';
 
-    auto symbols = cex::engine_app::symbol_configs_for_runtime(config);
-    cex::runtime::EngineRuntime runtime(cex::runtime::EngineRuntimeConfig{
-        .symbols = std::move(symbols),
-        .first_public_sequence = 1,
-    });
+    std::atomic_bool stop_requested{false};
+    std::mutex errors_mutex;
+    std::vector<std::string> worker_errors;
+    std::vector<std::jthread> workers;
+    workers.reserve(config.markets.size());
 
-    auto checkpoint_store = make_checkpoint_store(config);
-    cex::checkpoint::EngineCheckpointManager checkpoint_manager;
-
-    cex::broker::RdKafkaConsumerConfig consumer_config{
-        .bootstrap_servers = config.bootstrap_servers,
-        .group_id = config.consumer_group_id,
-        .topics = {config.input_topic},
-        .client_id = "engine-app-input-consumer",
-    };
-    cex::broker::RdKafkaProducerConfig producer_config{
-        .bootstrap_servers = config.bootstrap_servers,
-        .client_id = "engine-app-record-producer",
-    };
-
-    cex::broker::RdKafkaEngineInputConsumer consumer(consumer_config);
-    cex::recovery::RecoveryCoordinator recovery_coordinator(
-        *checkpoint_store, consumer, runtime, checkpoint_manager);
-    const auto recovery_result = recovery_coordinator.recover_and_replay();
-    log_recovery_result(recovery_result, config);
-    fail_if_recovery_incomplete(recovery_result);
-
-    cex::broker::RdKafkaEngineRecordProducer producer(producer_config);
-    cex::broker::RedpandaEngineApp app(
-        consumer,
-        producer,
-        consumer,
-        runtime,
-        config.input_topic,
-        [&](const cex::broker::ConsumedRecord& source,
-            const cex::runtime::EngineRuntime& checkpoint_runtime) {
-          return save_checkpoint_for_source(source,
-                                            checkpoint_runtime,
-                                            checkpoint_manager,
-                                            *checkpoint_store);
-        });
-
-    run_startup_automatic_liquidation_scan(runtime,
-                                           app,
-                                           recovery_result,
-                                           config.input_topic,
-                                           checkpoint_manager,
-                                           *checkpoint_store);
-
-    std::uint64_t poll_count{0};
-    while (!config.poll_loop_limit.has_value() ||
-           poll_count < *config.poll_loop_limit) {
-      ++poll_count;
-      const auto result = app.poll_once();
-      if (!result.ok()) {
-        std::cerr << "engine_app poll failed status="
-                  << status_name(result.status);
-        if (!result.error.empty()) {
-          std::cerr << " error=" << result.error;
+    for (const auto& market : config.markets) {
+      workers.emplace_back([&config,
+                            &stop_requested,
+                            &errors_mutex,
+                            &worker_errors,
+                            market] {
+        try {
+          run_engine_partition_worker(config, market, stop_requested);
+        } catch (const std::exception& error) {
+          {
+            std::lock_guard<std::mutex> lock(errors_mutex);
+            worker_errors.push_back(error.what());
+          }
+          stop_requested.store(true);
         }
-        std::cerr << '\n';
-        return EXIT_FAILURE;
-      }
+      });
+    }
 
-      if (result.status == cex::broker::EngineBrokerAppStatus::NoRecord) {
-        if (config.poll_loop_limit.has_value()) {
-          std::cerr << "poll " << poll_count << ": no record\n";
-        }
-        continue;
+    for (auto& worker : workers) {
+      if (worker.joinable()) {
+        worker.join();
       }
+    }
 
-      std::cerr << "poll " << poll_count << ": processed";
-      if (result.source.has_value()) {
-        std::cerr << " " << result.source->topic << '['
-                  << result.source->partition << "] offset="
-                  << result.source->offset;
+    if (!worker_errors.empty()) {
+      for (const auto& error : worker_errors) {
+        std::cerr << "engine_app worker failed: " << error << '\n';
       }
-      log_trace_summary(result.trace);
-      std::cerr << '\n';
+      return EXIT_FAILURE;
     }
 
     return EXIT_SUCCESS;

@@ -108,6 +108,11 @@ int main(int argc, char** argv) {
         producer,
         committer,
         runtime,
+        cex::broker::EngineInputGuardConfig{
+            .topic = cex::broker::EngineInputTopic,
+            .partition = 0,
+            .market_ids = {cex::bench::kSymbolId},
+        },
         std::move(hook));
 
     for (const auto& record : setup_records) {

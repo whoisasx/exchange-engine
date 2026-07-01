@@ -14,10 +14,17 @@ namespace cex::broker {
 
 using RdKafkaProperty = std::pair<std::string, std::string>;
 
+struct RdKafkaAssignedPartition {
+  std::string topic{EngineInputTopic};
+  std::int32_t partition{0};
+  std::int64_t offset{0};
+};
+
 struct RdKafkaConsumerConfig {
   std::string bootstrap_servers{"127.0.0.1:9092"};
   std::string group_id{"engine"};
   std::vector<std::string> topics{EngineInputTopic};
+  std::vector<RdKafkaAssignedPartition> assigned_partitions;
   std::chrono::milliseconds poll_timeout{100};
   std::chrono::milliseconds seek_timeout{5000};
   std::chrono::milliseconds watermark_timeout{5000};

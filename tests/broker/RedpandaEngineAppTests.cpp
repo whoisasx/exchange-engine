@@ -218,6 +218,19 @@ ConsumedRecord make_input_record(std::int64_t offset, std::string value) {
   };
 }
 
+std::string place_order_fixture_for_market(std::int64_t market_id) {
+  std::string value = place_order_fixture();
+  const std::string from = R"json("market_id": 1)json";
+  const std::string to = R"json("market_id": )json" +
+                         std::to_string(market_id);
+  const auto position = value.find(from);
+  if (position == std::string::npos) {
+    throw std::runtime_error("place order fixture missing market_id");
+  }
+  value.replace(position, from.size(), to);
+  return value;
+}
+
 void assert_committed_source_offset(const FakeCommitter& committer,
                                     std::int64_t offset) {
   assert(committer.commits.size() == 1);
@@ -542,6 +555,90 @@ void test_configured_input_topic_rejects_default_topic_without_commit() {
                              std::string(EngineInputTopic));
 }
 
+void test_configured_input_partition_rejects_wrong_partition_without_commit() {
+  const auto place_order = place_order_fixture();
+  ConsumedRecord record = make_input_record(501, place_order);
+  record.partition = 1;
+
+  FakeConsumer consumer({record});
+  FakeProducer producer;
+  FakeCommitter committer;
+  auto runtime = make_runtime();
+  RedpandaEngineApp app(
+      consumer,
+      producer,
+      committer,
+      runtime,
+      EngineInputGuardConfig{
+          .topic = EngineInputTopic,
+          .partition = 0,
+      });
+
+  const auto result = app.poll_once();
+
+  assert(result.status == EngineBrokerAppStatus::RejectedInputPartition);
+  assert(!result.committed);
+  assert(result.publish_result.attempted == 0);
+  assert(producer.records.empty());
+  assert(committer.commits.empty());
+  assert(result.error == "expected input partition 0, received 1");
+}
+
+void test_configured_market_processes_owned_market() {
+  const auto place_order = place_order_fixture();
+
+  FakeConsumer consumer({make_input_record(502, place_order)});
+  FakeProducer producer;
+  FakeCommitter committer;
+  auto runtime = make_runtime();
+  RedpandaEngineApp app(
+      consumer,
+      producer,
+      committer,
+      runtime,
+      EngineInputGuardConfig{
+          .topic = EngineInputTopic,
+          .partition = 0,
+          .market_ids = {1},
+      });
+
+  const auto result = app.poll_once();
+
+  assert(result.status == EngineBrokerAppStatus::Processed);
+  assert(result.committed);
+  assert(result.publish_result.ok());
+  assert(producer.records.size() == 3);
+  assert_committed_source_offset(committer, 502);
+}
+
+void test_configured_market_rejects_unowned_market_without_commit() {
+  const auto place_order = place_order_fixture_for_market(2);
+
+  FakeConsumer consumer({make_input_record(503, place_order)});
+  FakeProducer producer;
+  FakeCommitter committer;
+  auto runtime = make_runtime();
+  RedpandaEngineApp app(
+      consumer,
+      producer,
+      committer,
+      runtime,
+      EngineInputGuardConfig{
+          .topic = EngineInputTopic,
+          .partition = 0,
+          .market_ids = {1},
+      });
+
+  const auto result = app.poll_once();
+
+  assert(result.status == EngineBrokerAppStatus::RejectedInputMarket);
+  assert(!result.committed);
+  assert(result.publish_result.attempted == 0);
+  assert(producer.records.empty());
+  assert(committer.commits.empty());
+  assert(result.error == "market_id 2 is not owned by this engine worker");
+}
+
 }  // namespace
 
 int main() {
@@ -559,6 +656,9 @@ int main() {
     test_wrong_input_topic_is_rejected_without_commit();
     test_configured_input_topic_is_processed_and_committed();
     test_configured_input_topic_rejects_default_topic_without_commit();
+    test_configured_input_partition_rejects_wrong_partition_without_commit();
+    test_configured_market_processes_owned_market();
+    test_configured_market_rejects_unowned_market_without_commit();
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';
     return EXIT_FAILURE;

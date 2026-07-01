@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "adapter/EngineAdapter.hpp"
 #include "runtime/EngineOutbox.hpp"
 #include "runtime/EngineRuntime.hpp"
 #include "runtime/EngineRuntimeConfig.hpp"
@@ -126,6 +127,8 @@ enum class EngineBrokerAppStatus {
   NoRecord,
   Processed,
   RejectedInputTopic,
+  RejectedInputPartition,
+  RejectedInputMarket,
   PublishFailed,
   CheckpointFailed,
   CommitFailed,
@@ -148,6 +151,12 @@ struct EngineBrokerAppResult {
   }
 };
 
+struct EngineInputGuardConfig {
+  std::string topic{EngineInputTopic};
+  std::optional<std::int32_t> partition;
+  std::vector<cex::adapter::MarketId> market_ids;
+};
+
 class RedpandaEngineApp {
  public:
   RedpandaEngineApp(IEngineInputConsumer& consumer,
@@ -160,6 +169,12 @@ class RedpandaEngineApp {
                     IEngineOffsetCommitter& committer,
                     runtime::EngineRuntime& runtime,
                     std::string expected_input_topic,
+                    EnginePreCommitHook pre_commit_hook = {});
+  RedpandaEngineApp(IEngineInputConsumer& consumer,
+                    IEngineRecordProducer& producer,
+                    IEngineOffsetCommitter& committer,
+                    runtime::EngineRuntime& runtime,
+                    EngineInputGuardConfig guard_config,
                     EnginePreCommitHook pre_commit_hook = {});
 
   [[nodiscard]] EngineBrokerAppResult poll_once();
@@ -176,7 +191,7 @@ class RedpandaEngineApp {
   IEngineRecordProducer& producer_;
   IEngineOffsetCommitter& committer_;
   runtime::EngineRuntime& runtime_;
-  std::string expected_input_topic_;
+  EngineInputGuardConfig guard_config_;
   EnginePreCommitHook pre_commit_hook_;
   std::vector<OffsetCommitRequest> committed_offsets_;
 };

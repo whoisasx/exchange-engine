@@ -56,12 +56,16 @@ bench-harness/run-all.sh
 flowchart LR
     exchange[exchange-server] --> input[(engine.input)]
     input --> app[engine_app]
+    app --> workerA[partition worker<br/>market 1]
+    app --> workerB[partition worker<br/>market 2]
 
-    app --> recovery[RecoveryCoordinator]
+    workerA --> recovery[RecoveryCoordinator]
+    workerB --> recovery
     recovery --> checkpoint[(S3/MinIO or file checkpoint)]
     recovery --> input
 
-    app --> parser[EngineInputParser]
+    workerA --> parser[EngineInputParser]
+    workerB --> parser
     parser --> runtime[EngineRuntime]
     runtime --> core[Core Engine<br/>orderbook + matching + risk]
     core --> outbox[EngineOutbox]
@@ -99,6 +103,10 @@ sequenceDiagram
 Checkpoints are saved before input offsets are committed. If checkpoint save
 fails, the engine fails loudly and does not commit the offset.
 
+`engine_app` starts one worker per configured market. Each worker owns one
+`engine.input` partition, one `EngineRuntime`, and one checkpoint namespace, so
+one market stays single-threaded while different markets can run in parallel.
+
 ## Core Features
 
 - Price-time priority matching with deterministic orderbook behavior.
@@ -107,6 +115,7 @@ fails, the engine fails loudly and does not commit the offset.
 - JSON stream contract shared with the exchange repo.
 - Redpanda app boundary for `engine.input`, `engine.replies`, and
   `engine.events`.
+- Partition-scoped workers for multi-market parallelism.
 - File and S3-compatible checkpoint stores for recovery.
 - Focused benchmark harness for core, runtime, and broker-loop measurements.
 

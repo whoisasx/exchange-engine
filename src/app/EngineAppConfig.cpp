@@ -19,6 +19,7 @@ struct MarketConfigBuilder {
   std::size_t start_line{0};
   std::optional<cex::adapter::MarketId> market_id;
   std::optional<std::string> market_name;
+  std::optional<std::int32_t> input_partition;
   std::optional<std::int64_t> tick_size;
   std::optional<std::uint64_t> lot_size;
   std::optional<std::uint64_t> min_quantity;
@@ -216,6 +217,10 @@ void validate_loaded_market(const EngineMarketConfig& market,
     throw std::invalid_argument(config_error_prefix(path, line_number) +
                                 "market_name must not be empty");
   }
+  if (market.input_partition < 0) {
+    throw std::invalid_argument(config_error_prefix(path, line_number) +
+                                "input_partition must not be negative");
+  }
   if (symbol.tickSize.ticks() <= 0) {
     throw std::invalid_argument(config_error_prefix(path, line_number) +
                                 "tick_size must be positive");
@@ -271,6 +276,9 @@ void assign_market_key(MarketConfigBuilder& builder,
         value, key, path, line_number);
   } else if (key == "market_name") {
     builder.market_name = std::string(value);
+  } else if (key == "input_partition") {
+    builder.input_partition =
+        parse_integer_field<std::int32_t>(value, key, path, line_number);
   } else if (key == "tick_size") {
     builder.tick_size =
         parse_integer_field<std::int64_t>(value, key, path, line_number);
@@ -327,6 +335,8 @@ void assign_market_key(MarketConfigBuilder& builder,
       .market_id = market_id,
       .market_name = required_market_field(
           builder.market_name, "market_name", path, line_number),
+      .input_partition = required_market_field(
+          builder.input_partition, "input_partition", path, line_number),
       .symbol_config =
           SymbolConfig{
               .symbolId = symbol_id_from_market_id(market_id, path, line_number),
@@ -383,7 +393,8 @@ void append_market_config(
     const std::filesystem::path& path,
     std::vector<EngineMarketConfig>& markets,
     std::unordered_set<cex::adapter::MarketId>& market_ids,
-    std::unordered_set<std::string>& market_names) {
+    std::unordered_set<std::string>& market_names,
+    std::unordered_set<std::int32_t>& input_partitions) {
   auto market = build_market_config(builder, path);
   if (!market_ids.insert(market.market_id).second) {
     throw std::invalid_argument(config_error_prefix(path, builder.start_line) +
@@ -394,6 +405,11 @@ void append_market_config(
     throw std::invalid_argument(config_error_prefix(path, builder.start_line) +
                                 "duplicate market_name " +
                                 market.market_name);
+  }
+  if (!input_partitions.insert(market.input_partition).second) {
+    throw std::invalid_argument(config_error_prefix(path, builder.start_line) +
+                                "duplicate input_partition " +
+                                std::to_string(market.input_partition));
   }
   markets.push_back(std::move(market));
 }
@@ -409,6 +425,7 @@ void append_market_config(
   std::vector<EngineMarketConfig> markets;
   std::unordered_set<cex::adapter::MarketId> market_ids;
   std::unordered_set<std::string> market_names;
+  std::unordered_set<std::int32_t> input_partitions;
   std::optional<MarketConfigBuilder> current_market;
   std::string line;
   std::size_t line_number{0};
@@ -427,7 +444,12 @@ void append_market_config(
     if (text == "[[market]]") {
       if (current_market.has_value()) {
         append_market_config(
-            *current_market, path, markets, market_ids, market_names);
+            *current_market,
+            path,
+            markets,
+            market_ids,
+            market_names,
+            input_partitions);
       }
       current_market.emplace(line_number);
       continue;
@@ -450,7 +472,12 @@ void append_market_config(
   }
 
   if (current_market.has_value()) {
-    append_market_config(*current_market, path, markets, market_ids, market_names);
+    append_market_config(*current_market,
+                         path,
+                         markets,
+                         market_ids,
+                         market_names,
+                         input_partitions);
   }
   if (markets.empty()) {
     throw std::invalid_argument("markets config '" + path.string() +
@@ -529,6 +556,7 @@ EngineMarketConfig default_sol_perp_market_config() {
   return EngineMarketConfig{
       .market_id = DefaultMarketId,
       .market_name = DefaultMarketName,
+      .input_partition = DefaultInputPartition,
       .symbol_config =
           SymbolConfig{
               .symbolId = 1,
@@ -735,6 +763,8 @@ std::string engine_app_usage(std::string_view executable_name) {
          "  --checkpoint-s3-prefix <path>  Optional S3 object prefix\n"
          "  --markets-config <path>        Market config file; repeat "
          "[[market]] sections with key=value fields\n"
+         "                                 Required per [[market]]: "
+         "market_id, market_name, input_partition, symbol fields\n"
          "  --poll-limit <count>           Stop after count poll attempts\n"
          "  --once                         Stop after one poll attempt\n"
          "  -h, --help                     Show this help\n"

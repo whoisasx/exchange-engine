@@ -152,10 +152,11 @@ cex::runtime::InboundEngineRecord make_runtime_record(
 }
 
 ConsumedRecord make_consumed_record(std::string value,
-                                    std::int64_t offset) {
+                                    std::int64_t offset,
+                                    std::int32_t partition = 0) {
   return ConsumedRecord{
       .topic = EngineInputTopic,
-      .partition = 0,
+      .partition = partition,
       .offset = offset,
       .key = std::string{"1"},
       .value = std::move(value),
@@ -518,6 +519,96 @@ void test_no_checkpoint_reports_no_recovery_needed() {
   assert(result.caught_up);
   assert(result.error.empty());
   assert(store.load_calls == 1);
+  assert(consumer.watermark_calls == 0);
+  assert(consumer.seeks.empty());
+  assert(consumer.poll_calls == 0);
+  assert_book_does_not_have_order(runtime, 9001);
+}
+
+void test_no_checkpoint_with_expected_source_seeks_to_low_watermark() {
+  FakeCheckpointStore store;
+  FakeConsumer consumer;
+  consumer.watermark = BrokerWatermarkOffsets{.low = 10, .high = 10};
+  auto runtime = make_runtime();
+  RecoveryCoordinator coordinator(
+      store,
+      consumer,
+      runtime,
+      EngineCheckpointManager{},
+      RecoverySource{.topic = EngineInputTopic, .partition = 2});
+
+  const auto result = coordinator.recover();
+
+  assert(result.status == RecoveryStatus::NoCheckpoint);
+  assert(result.ok());
+  assert(result.caught_up);
+  assert(result.source_position.has_value());
+  assert(result.source_position->topic == EngineInputTopic);
+  assert(result.source_position->partition == 2);
+  assert(result.source_position->next_offset == 10);
+  assert(result.next_offset == 10);
+  assert(result.watermark.has_value());
+  assert(result.watermark->low == 10);
+  assert(result.watermark->high == 10);
+  assert(consumer.watermark_calls == 1);
+  assert(consumer.seeks.size() == 1);
+  assert(consumer.seeks[0].topic == EngineInputTopic);
+  assert(consumer.seeks[0].partition == 2);
+  assert(consumer.seeks[0].offset == 10);
+  assert(consumer.poll_calls == 0);
+}
+
+void test_no_checkpoint_with_expected_source_replays_retained_records() {
+  const auto replayed_order =
+      place_order_json("input_replay_from_start",
+                       "req_replay_from_start",
+                       "client-replay-from-start",
+                       9105);
+  FakeCheckpointStore store;
+  FakeConsumer consumer({make_consumed_record(replayed_order, 5, 2)});
+  consumer.watermark = BrokerWatermarkOffsets{.low = 5, .high = 6};
+  auto runtime = make_runtime();
+  RecoveryCoordinator coordinator(
+      store,
+      consumer,
+      runtime,
+      EngineCheckpointManager{},
+      RecoverySource{.topic = EngineInputTopic, .partition = 2});
+
+  const auto result = coordinator.recover_and_replay();
+
+  assert(result.status == RecoveryStatus::Replayed);
+  assert(result.ok());
+  assert(result.caught_up);
+  assert(result.source_position.has_value());
+  assert(result.source_position->partition == 2);
+  assert(result.next_offset == 6);
+  assert(result.replayed_records == 1);
+  assert(result.last_replayed_offset == 5);
+  assert(consumer.seeks.size() == 1);
+  assert(consumer.seeks[0].partition == 2);
+  assert(consumer.seeks[0].offset == 5);
+  assert(consumer.poll_calls == 1);
+  assert_book_has_order(runtime, 9105);
+}
+
+void test_checkpoint_source_mismatch_fails_before_watermark() {
+  FakeCheckpointStore store;
+  store.save(make_checkpoint(1202));
+  FakeConsumer consumer;
+  auto runtime = make_runtime();
+  RecoveryCoordinator coordinator(
+      store,
+      consumer,
+      runtime,
+      EngineCheckpointManager{},
+      RecoverySource{.topic = EngineInputTopic, .partition = 1});
+
+  const auto result = coordinator.recover();
+
+  assert(result.status == RecoveryStatus::SourceMismatch);
+  assert(!result.ok());
+  assert_contains(result.error, "does not match expected");
   assert(consumer.watermark_calls == 0);
   assert(consumer.seeks.empty());
   assert(consumer.poll_calls == 0);
@@ -968,6 +1059,9 @@ void test_replay_recovery_matches_uninterrupted_runtime() {
 int main() {
   try {
     test_no_checkpoint_reports_no_recovery_needed();
+    test_no_checkpoint_with_expected_source_seeks_to_low_watermark();
+    test_no_checkpoint_with_expected_source_replays_retained_records();
+    test_checkpoint_source_mismatch_fails_before_watermark();
     test_successful_recover_restores_and_seeks();
     test_retention_gap_below_low_watermark_fails();
     test_checkpoint_above_high_watermark_fails();

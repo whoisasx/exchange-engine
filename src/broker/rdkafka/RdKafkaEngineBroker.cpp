@@ -8,6 +8,7 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -197,6 +198,20 @@ void apply_properties(RdKafka::Conf& conf,
   return output.str();
 }
 
+[[nodiscard]] std::string join_partitions(
+    const std::vector<RdKafkaAssignedPartition>& partitions) {
+  std::ostringstream output;
+  for (std::size_t index = 0; index < partitions.size(); ++index) {
+    if (index != 0) {
+      output << ',';
+    }
+    output << describe_partition(partitions[index].topic,
+                                 partitions[index].partition)
+           << '@' << partitions[index].offset;
+  }
+  return output.str();
+}
+
 [[nodiscard]] ConfPtr create_consumer_conf(
     const RdKafkaConsumerConfig& config) {
   auto conf = create_global_conf();
@@ -292,12 +307,27 @@ std::optional<std::string> validate_config(
   if (auto error = validate_group_id(config.group_id); error.has_value()) {
     return error;
   }
-  if (config.topics.empty()) {
-    return "topics must not be empty";
+  if (config.topics.empty() && config.assigned_partitions.empty()) {
+    return "topics or assigned_partitions must not be empty";
   }
   for (const auto& topic : config.topics) {
     if (blank(topic)) {
       return "topic names must not be empty";
+    }
+  }
+  std::set<std::pair<std::string, std::int32_t>> assigned;
+  for (const auto& partition : config.assigned_partitions) {
+    if (blank(partition.topic)) {
+      return "assigned partition topic must not be empty";
+    }
+    if (partition.partition < 0) {
+      return "assigned partition must not be negative";
+    }
+    if (partition.offset < 0) {
+      return "assigned partition offset must not be negative";
+    }
+    if (!assigned.insert({partition.topic, partition.partition}).second) {
+      return "assigned partitions must not contain duplicates";
     }
   }
   if (auto error = validate_timeout(config.poll_timeout, "poll_timeout");
@@ -339,11 +369,13 @@ struct RdKafkaEngineInputConsumer::Impl {
   Impl(ConsumerPtr consumer,
        std::chrono::milliseconds poll_timeout,
        std::chrono::milliseconds seek_timeout,
-       std::chrono::milliseconds watermark_timeout)
+       std::chrono::milliseconds watermark_timeout,
+       bool statically_assigned)
       : consumer(std::move(consumer)),
         poll_timeout(poll_timeout),
         seek_timeout(seek_timeout),
-        watermark_timeout(watermark_timeout) {}
+        watermark_timeout(watermark_timeout),
+        statically_assigned(statically_assigned) {}
 
   ~Impl() {
     if (consumer) {
@@ -355,6 +387,7 @@ struct RdKafkaEngineInputConsumer::Impl {
   std::chrono::milliseconds poll_timeout;
   std::chrono::milliseconds seek_timeout;
   std::chrono::milliseconds watermark_timeout;
+  bool statically_assigned{false};
 };
 
 RdKafkaEngineInputConsumer::RdKafkaEngineInputConsumer(
@@ -371,18 +404,49 @@ RdKafkaEngineInputConsumer::RdKafkaEngineInputConsumer(
                                    errstr);
   }
 
-  const RdKafka::ErrorCode subscribe_result =
-      consumer->subscribe(config.topics);
-  if (subscribe_result != RdKafka::ERR_NO_ERROR) {
-    consumer->close();
-    throw RdKafkaConstructionError("failed to subscribe rdkafka consumer to " +
-                                   join_topics(config.topics) + ": " +
-                                   describe_error(subscribe_result));
+  const bool statically_assigned = !config.assigned_partitions.empty();
+  if (statically_assigned) {
+    std::vector<TopicPartitionPtr> owned_partitions;
+    std::vector<RdKafka::TopicPartition*> assignment;
+    owned_partitions.reserve(config.assigned_partitions.size());
+    assignment.reserve(config.assigned_partitions.size());
+
+    for (const auto& source : config.assigned_partitions) {
+      TopicPartitionPtr partition(RdKafka::TopicPartition::create(
+          source.topic, source.partition, source.offset));
+      if (!partition) {
+        consumer->close();
+        throw RdKafkaConstructionError(
+            "failed to create rdkafka topic partition for assignment");
+      }
+      assignment.push_back(partition.get());
+      owned_partitions.push_back(std::move(partition));
+    }
+
+    const RdKafka::ErrorCode assign_result = consumer->assign(assignment);
+    if (assign_result != RdKafka::ERR_NO_ERROR) {
+      consumer->close();
+      throw RdKafkaConstructionError(
+          "failed to assign rdkafka consumer to " +
+          join_partitions(config.assigned_partitions) + ": " +
+          describe_error(assign_result));
+    }
+  } else {
+    const RdKafka::ErrorCode subscribe_result =
+        consumer->subscribe(config.topics);
+    if (subscribe_result != RdKafka::ERR_NO_ERROR) {
+      consumer->close();
+      throw RdKafkaConstructionError(
+          "failed to subscribe rdkafka consumer to " +
+          join_topics(config.topics) + ": " +
+          describe_error(subscribe_result));
+    }
   }
 
   impl_ = std::make_unique<Impl>(std::move(consumer), config.poll_timeout,
                                  config.seek_timeout,
-                                 config.watermark_timeout);
+                                 config.watermark_timeout,
+                                 statically_assigned);
 }
 
 RdKafkaEngineInputConsumer::~RdKafkaEngineInputConsumer() = default;
@@ -452,11 +516,14 @@ std::optional<std::string> RdKafkaEngineInputConsumer::seek(
     return "failed to create rdkafka topic partition for seek";
   }
 
-  const RdKafka::ErrorCode unsubscribe_result = impl_->consumer->unsubscribe();
-  if (unsubscribe_result != RdKafka::ERR_NO_ERROR) {
-    return "rdkafka unsubscribe failed before seek for " +
-           describe_partition(topic, partition) + ": " +
-           describe_error(unsubscribe_result);
+  if (!impl_->statically_assigned) {
+    const RdKafka::ErrorCode unsubscribe_result =
+        impl_->consumer->unsubscribe();
+    if (unsubscribe_result != RdKafka::ERR_NO_ERROR) {
+      return "rdkafka unsubscribe failed before seek for " +
+             describe_partition(topic, partition) + ": " +
+             describe_error(unsubscribe_result);
+    }
   }
 
   std::vector<RdKafka::TopicPartition*> assignment{target.get()};

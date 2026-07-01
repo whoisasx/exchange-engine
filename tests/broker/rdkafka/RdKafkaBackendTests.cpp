@@ -26,6 +26,15 @@ void test_valid_configs() {
   assert(!validate_config(RdKafkaConsumerConfig{}).has_value());
   assert(!validate_config(RdKafkaProducerConfig{}).has_value());
   assert(!validate_config(RdKafkaOffsetCommitterConfig{}).has_value());
+
+  RdKafkaConsumerConfig assigned_consumer;
+  assigned_consumer.topics.clear();
+  assigned_consumer.assigned_partitions.push_back(RdKafkaAssignedPartition{
+      .topic = EngineInputTopic,
+      .partition = 1,
+      .offset = 0,
+  });
+  assert(!validate_config(assigned_consumer).has_value());
 }
 
 void test_consumer_config_validation() {
@@ -45,6 +54,43 @@ void test_consumer_config_validation() {
   config = RdKafkaConsumerConfig{};
   config.topics = {EngineInputTopic, ""};
   assert_config_error_contains(validate_config(config), "topic names");
+
+  config = RdKafkaConsumerConfig{};
+  config.assigned_partitions.push_back(RdKafkaAssignedPartition{
+      .topic = "",
+      .partition = 0,
+      .offset = 0,
+  });
+  assert_config_error_contains(validate_config(config), "assigned partition");
+
+  config = RdKafkaConsumerConfig{};
+  config.assigned_partitions.push_back(RdKafkaAssignedPartition{
+      .topic = EngineInputTopic,
+      .partition = -1,
+      .offset = 0,
+  });
+  assert_config_error_contains(validate_config(config), "not be negative");
+
+  config = RdKafkaConsumerConfig{};
+  config.assigned_partitions.push_back(RdKafkaAssignedPartition{
+      .topic = EngineInputTopic,
+      .partition = 0,
+      .offset = -1,
+  });
+  assert_config_error_contains(validate_config(config), "offset");
+
+  config = RdKafkaConsumerConfig{};
+  config.assigned_partitions.push_back(RdKafkaAssignedPartition{
+      .topic = EngineInputTopic,
+      .partition = 2,
+      .offset = 0,
+  });
+  config.assigned_partitions.push_back(RdKafkaAssignedPartition{
+      .topic = EngineInputTopic,
+      .partition = 2,
+      .offset = 10,
+  });
+  assert_config_error_contains(validate_config(config), "duplicates");
 
   config = RdKafkaConsumerConfig{};
   config.poll_timeout = std::chrono::milliseconds{-1};

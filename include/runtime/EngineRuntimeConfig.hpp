@@ -124,6 +124,7 @@ struct EngineProcessResult {
 struct EngineRuntimeConfig {
   std::vector<SymbolConfig> symbols;
   EngineSequence first_public_sequence{1};
+  TradeId first_trade_id{1};
   EngineRuntimeClock clock;
 };
 

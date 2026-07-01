@@ -29,11 +29,15 @@ All stream messages are JSON encoded with this shape:
 flowchart LR
     wallet[exchange wallet] --> input[(engine.input)]
     ingress[engine-ingress tools] --> input
-    input --> engine[engine_app]
+    input --> worker0[engine worker<br/>market 1 / partition 4]
+    input --> worker1[engine worker<br/>market 2 / partition 5]
 
-    engine --> replies[(engine.replies)]
-    engine --> events[(engine.events)]
-    engine --> checkpoint[(S3/file checkpoint)]
+    worker0 --> replies[(engine.replies)]
+    worker1 --> replies
+    worker0 --> events[(engine.events)]
+    worker1 --> events
+    worker0 --> checkpoint[(S3/file checkpoint)]
+    worker1 --> checkpoint
 
     replies --> server[exchange server reply consumer]
     events --> walletConsumer[exchange wallet]
@@ -46,7 +50,7 @@ flowchart LR
 
 | Topic | Producer | Consumer | Purpose |
 | --- | --- | --- | --- |
-| `engine.input` | wallet / MVP engine ingress | C++ engine | Globally ordered engine-affecting inputs for orders, cancels, mark price, and funding. |
+| `engine.input` | wallet / MVP engine ingress | C++ engine | Market-partitioned engine-affecting inputs for orders, cancels, mark price, and funding. |
 | `engine.replies` | C++ engine | server reply consumer | Request lifecycle replies only. |
 | `engine.events` | C++ engine | wallet, projector, websocket, ledger, timeseries | Durable engine facts and state changes. |
 
@@ -54,24 +58,24 @@ For MVP, the wallet process is the engine ingress publisher because it already o
 
 ## Topic Provisioning
 
-Provisioning must not rely on broker defaults for `engine.input`. Local, e2e, and production topic creation must create it with one partition and 30-minute time retention:
+Provisioning must not rely on broker defaults for `engine.input`. Local, e2e, and production topic creation must create it with an explicit partition count and 30-minute time retention:
 
 ```sh
-rpk topic create --if-not-exists --partitions 1 -c retention.ms=1800000 engine.input
+rpk topic create --if-not-exists --partitions 8 -c retention.ms=1800000 engine.input
 rpk topic alter-config engine.input --set retention.ms=1800000
 ```
 
-The single partition is part of the engine recovery contract: every engine-affecting input must share one ordered Redpanda log. The 30-minute `retention.ms` setting matches the MVP recovery window in the engine plan.
+The partition count must cover the configured engine market ownership map. Each `[[market]]` in the engine markets config owns one non-negative `input_partition`, and duplicate partition ownership is rejected. The exchange publisher uses the same stable key partitioning for `market_id`, so the engine markets config must use the partition result for the configured topic partition count. The 30-minute `retention.ms` setting matches the MVP recovery window in the engine plan.
 
 ## Ordering
 
 | Topic | Record key | Ordering rule |
 | --- | --- | --- |
-| `engine.input` | none required for MVP; payload carries `market_id` | Single ordered input log. The engine dispatcher reads in offset order, then routes each input to the owning market thread. |
+| `engine.input` | `market_id` as string | Inputs for one market must land on that market's configured input partition and are processed by that partition's single-threaded worker. |
 | `engine.replies` | `request_id` | Engine must publish to `payload.envelope.reply_partition` from the original request input. |
 | `engine.events` | `market_id` as string | Engine should keep events for one market ordered on the same partition. |
 
-All engine-affecting inputs enter the single ordered `engine.input` log. Mark price and funding are first-class inputs in that log; they are not embedded into user order commands. This gives recovery one input offset while still allowing the engine to dispatch work to per-market threads internally.
+All engine-affecting inputs enter `engine.input` keyed by `market_id`. Mark price and funding are first-class inputs in that log; they are not embedded into user order commands. Each engine worker owns one input partition, one runtime, one recovery coordinator, and one checkpoint namespace, so a single market remains single-threaded while different markets can run in parallel.
 
 For every `market_id`, the engine must emit a strictly increasing `engine_sequence` on every event for that market. Redpanda offsets are still used by consumers for replay progress, but consumers should use `(market_id, engine_sequence)` for market ordering. Global ordering across markets is not guaranteed.
 

@@ -26,6 +26,7 @@ inline constexpr const char* DefaultCheckpointS3SecretKey = "minioadmin";
 inline constexpr const char* DefaultCheckpointS3Region = "us-east-1";
 inline constexpr const char* DefaultMarketName = "SOL-PERP";
 inline constexpr cex::adapter::MarketId DefaultMarketId = 1;
+inline constexpr std::int32_t DefaultInputPartition = 0;
 
 inline constexpr const char* BootstrapServersEnv =
     "CEX_ENGINE_BOOTSTRAP_SERVERS";
@@ -58,6 +59,7 @@ enum class EngineCheckpointStoreKind {
 struct EngineMarketConfig {
   cex::adapter::MarketId market_id{DefaultMarketId};
   std::string market_name{DefaultMarketName};
+  std::int32_t input_partition{DefaultInputPartition};
   SymbolConfig symbol_config;
 };
 

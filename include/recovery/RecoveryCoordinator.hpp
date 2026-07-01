@@ -16,6 +16,7 @@ enum class RecoveryStatus {
   NoCheckpoint,
   Recovered,
   Replayed,
+  SourceMismatch,
   CheckpointLoadFailed,
   WatermarkUnavailable,
   InvalidWatermark,
@@ -45,13 +46,20 @@ struct RecoveryResult {
   }
 };
 
+struct RecoverySource {
+  std::string topic{cex::broker::EngineInputTopic};
+  std::int32_t partition{0};
+};
+
 class RecoveryCoordinator {
  public:
   RecoveryCoordinator(cex::checkpoint::ICheckpointStore& checkpoint_store,
                       cex::broker::IEngineInputConsumer& consumer,
                       cex::runtime::EngineRuntime& runtime,
                       cex::checkpoint::EngineCheckpointManager
-                          checkpoint_manager = {});
+                          checkpoint_manager = {},
+                      std::optional<RecoverySource> expected_source =
+                          std::nullopt);
 
   [[nodiscard]] RecoveryResult recover();
   [[nodiscard]] RecoveryResult recover_and_replay();
@@ -66,6 +74,7 @@ class RecoveryCoordinator {
   cex::broker::IEngineInputConsumer& consumer_;
   cex::runtime::EngineRuntime& runtime_;
   cex::checkpoint::EngineCheckpointManager checkpoint_manager_;
+  std::optional<RecoverySource> expected_source_;
 };
 
 }  // namespace cex::recovery

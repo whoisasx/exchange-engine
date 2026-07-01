@@ -27,9 +27,13 @@ and MinIO services with `test-harness/exchange-e2e-markets.conf`.
 flowchart LR
     env[CEX_ENGINE_* env] --> app[engine_app config]
     cli[CLI flags] --> app
-    app --> rp[(Redpanda)]
-    app --> store[(Checkpoint store)]
-    app --> markets[Market config]
+    markets[Market config<br/>market_id + input_partition] --> app
+    app --> worker0[worker partition 0]
+    app --> worker1[worker partition 1]
+    worker0 --> rp[(Redpanda)]
+    worker1 --> rp
+    worker0 --> store[(Checkpoint store)]
+    worker1 --> store
 ```
 
 The exchange e2e harness expects:
@@ -40,3 +44,38 @@ The exchange e2e harness expects:
 - Input topic `engine.input`.
 - Reply topic `engine.replies`.
 - Event topic `engine.events`.
+
+## Market Config
+
+The built-in default market is `SOL-PERP` on `input_partition = 0`. A market
+config file must provide one `input_partition` per market:
+
+```text
+[[market]]
+market_id = 1
+market_name = SOL-PERP
+input_partition = 0
+tick_size = 1
+lot_size = 1
+min_quantity = 1
+max_quantity = 1000000
+min_price = 1
+max_price = 1000000
+ring_capacity_ticks = 1000
+threshold_percentage = 10
+initial_base_tick = 0
+price_scale = 0
+quantity_scale = 0
+maker_fee_rate = 0
+taker_fee_rate = 0
+trading_enabled = true
+```
+
+Duplicate `input_partition` values are rejected. The exchange publisher must
+key `engine.input` records by `market_id` so Redpanda routes every market to
+the partition owned by its engine worker.
+
+For the local exchange e2e harness, `engine.input` defaults to eight
+partitions. The included `test-harness/exchange-e2e-markets.conf` therefore
+uses `input_partition = 4` for `market_id = 1` and `input_partition = 5` for
+`market_id = 2`, matching the exchange publisher's stable partition function.

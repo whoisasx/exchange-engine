@@ -14,6 +14,17 @@ namespace {
          "] next_offset=" + std::to_string(position.next_offset);
 }
 
+[[nodiscard]] std::string describe_source(const RecoverySource& source) {
+  return source.topic + "[" + std::to_string(source.partition) + "]";
+}
+
+[[nodiscard]] bool same_source(
+    const cex::checkpoint::CheckpointSourcePosition& position,
+    const RecoverySource& expected) {
+  return position.topic == expected.topic &&
+         position.partition == expected.partition;
+}
+
 [[nodiscard]] RecoveryResult with_checkpoint(
     const cex::checkpoint::EngineCheckpoint& checkpoint) {
   return RecoveryResult{
@@ -79,11 +90,13 @@ RecoveryCoordinator::RecoveryCoordinator(
     cex::checkpoint::ICheckpointStore& checkpoint_store,
     cex::broker::IEngineInputConsumer& consumer,
     cex::runtime::EngineRuntime& runtime,
-    cex::checkpoint::EngineCheckpointManager checkpoint_manager)
+    cex::checkpoint::EngineCheckpointManager checkpoint_manager,
+    std::optional<RecoverySource> expected_source)
     : checkpoint_store_(checkpoint_store),
       consumer_(consumer),
       runtime_(runtime),
-      checkpoint_manager_(std::move(checkpoint_manager)) {}
+      checkpoint_manager_(std::move(checkpoint_manager)),
+      expected_source_(std::move(expected_source)) {}
 
 RecoveryResult RecoveryCoordinator::recover() {
   return recover_impl(false);
@@ -103,15 +116,83 @@ RecoveryResult RecoveryCoordinator::recover_impl(bool replay) {
                 error.what());
   }
 
-  if (!checkpoint.has_value()) {
+  if (!checkpoint.has_value() && !expected_source_.has_value()) {
     return RecoveryResult{
         .status = RecoveryStatus::NoCheckpoint,
         .caught_up = true,
     };
   }
 
+  if (!checkpoint.has_value()) {
+    const auto& expected = *expected_source_;
+    cex::checkpoint::CheckpointSourcePosition start_position{
+        .topic = expected.topic,
+        .partition = expected.partition,
+        .next_offset = 0,
+    };
+    RecoveryResult result{
+        .status = RecoveryStatus::NoCheckpoint,
+        .source_position = start_position,
+    };
+
+    const cex::broker::BrokerWatermarkResult watermark_result =
+        consumer_.get_watermark(expected.topic, expected.partition);
+    if (!watermark_result.ok()) {
+      std::string error = "broker watermark unavailable for " +
+                          describe_source(expected);
+      if (watermark_result.error.has_value()) {
+        error = *watermark_result.error;
+      }
+      return fail(std::move(result),
+                  RecoveryStatus::WatermarkUnavailable,
+                  std::move(error));
+    }
+
+    result.watermark = watermark_result.offsets;
+    if (watermark_result.offsets->low < 0 ||
+        watermark_result.offsets->high < 0 ||
+        watermark_result.offsets->low > watermark_result.offsets->high) {
+      start_position.next_offset = watermark_result.offsets->low;
+      result.source_position = start_position;
+      return fail(std::move(result),
+                  RecoveryStatus::InvalidWatermark,
+                  "invalid broker watermark for " +
+                      describe_source(expected) + ": low=" +
+                      std::to_string(watermark_result.offsets->low) +
+                      ", high=" +
+                      std::to_string(watermark_result.offsets->high));
+    }
+
+    start_position.next_offset = watermark_result.offsets->low;
+    result.source_position = start_position;
+    result.next_offset = start_position.next_offset;
+    if (auto error = consumer_.seek(expected.topic,
+                                    expected.partition,
+                                    start_position.next_offset);
+        error.has_value()) {
+      return fail(std::move(result),
+                  RecoveryStatus::SeekFailed,
+                  std::move(*error));
+    }
+
+    result.caught_up = result.next_offset >= watermark_result.offsets->high;
+    if (replay && !result.caught_up) {
+      return replay_until_caught_up(std::move(result),
+                                    *watermark_result.offsets);
+    }
+    return result;
+  }
+
   RecoveryResult result = with_checkpoint(*checkpoint);
   const auto& position = checkpoint->source_position;
+
+  if (expected_source_.has_value() && !same_source(position, *expected_source_)) {
+    return fail(std::move(result),
+                RecoveryStatus::SourceMismatch,
+                "checkpoint source " + describe_position(position) +
+                    " does not match expected " +
+                    describe_source(*expected_source_));
+  }
 
   const cex::broker::BrokerWatermarkResult watermark_result =
       consumer_.get_watermark(position.topic, position.partition);

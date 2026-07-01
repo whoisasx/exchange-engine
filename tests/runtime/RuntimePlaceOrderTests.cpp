@@ -1160,6 +1160,27 @@ void test_runtime_crossing_order_emits_trade() {
   assert(runtime.metadata_store().empty());
 }
 
+void test_runtime_uses_configured_first_trade_id() {
+  auto runtime = EngineRuntime(EngineRuntimeConfig{
+      .symbols = {make_symbol()},
+      .first_public_sequence = 1,
+      .first_trade_id = 9'000'000'000'001ULL,
+      .clock = [] { return 1'710'000'000'000LL; },
+  });
+  const auto resting = read_file(
+      std::filesystem::path(PROTOCOL_EXAMPLES_DIR) /
+      "engine-place-order.command.json");
+  (void)runtime.process(make_record(resting, 1201));
+
+  const auto result = runtime.process(make_record(crossing_order_json(), 1202));
+
+  const auto* trade = find_record(result.events, "TradeExecuted");
+  assert(trade != nullptr);
+  assert(trade->payload.at("fill_id") == "9000000000001");
+  const auto trade_message = parse_serialized_output(*trade);
+  assert_payload_number(trade_message, "fill_id", "9000000000001");
+}
+
 void test_reduce_only_rejects_without_position() {
   auto runtime = make_runtime();
   const auto reduce_only = custom_place_order_json("input_reduce_no_pos",
@@ -2743,6 +2764,7 @@ int main() {
     test_funding_settlement_tick_validation();
     test_runtime_resting_limit_order();
     test_runtime_crossing_order_emits_trade();
+    test_runtime_uses_configured_first_trade_id();
     test_reduce_only_rejects_without_position();
     test_reduce_only_rejects_wrong_side();
     test_reduce_only_exact_close_does_not_rest();
