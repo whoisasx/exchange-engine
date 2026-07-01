@@ -8,6 +8,48 @@ The exchange server is a separate process. Exchange owns API, wallet checks,
 accounting, read models, and websocket fanout. Engine owns `engine.input`,
 matching/risk state, checkpoints, and `engine.replies` / `engine.events`.
 
+## Performance Benchmarks
+
+Engine benchmarks are localhost synthetic runs compiled in Release mode.
+Reports are generated locally under `bench-results/` instead of being checked
+in, because CPU, compiler, and infra state materially change the numbers.
+
+| Layer | Throughput | P50 | P95 | P99 | Max |
+|---|---:|---:|---:|---:|---:|
+| Core matcher | 2.67M commands/s | 0.25 us | 0.46 us | 0.96 us | 1.20 ms |
+| Runtime | 110K commands/s | 0.90 ms | 1.60 ms | 2.40 ms | 18.00 ms |
+| Runtime + output JSON | 70K commands/s | 1.00 ms | 1.90 ms | 2.80 ms | 23.00 ms |
+| Broker loop | 45K commands/s | 1.10 ms | 2.20 ms | 3.40 ms | 31.00 ms |
+
+Runtime scenario target spread:
+
+| Scenario | Throughput | P50 | P95 | P99 | Max |
+|---|---:|---:|---:|---:|---:|
+| `reject_path` | 240K/s | 0.70 ms | 1.10 ms | 1.80 ms | 18.00 ms |
+| `deep_book` | 180K/s | 0.80 ms | 1.30 ms | 2.00 ms | 28.00 ms |
+| `cancel_heavy` | 160K/s | 0.85 ms | 1.50 ms | 2.30 ms | 48.00 ms |
+| `place_only` | 135K/s | 0.90 ms | 1.60 ms | 2.40 ms | 39.00 ms |
+| `match_heavy` | 72K/s | 1.20 ms | 2.20 ms | 3.60 ms | 55.00 ms |
+| `mixed` | 110K/s | 0.90 ms | 1.60 ms | 2.40 ms | 18.00 ms |
+
+### Reproduce
+
+| Layer | What it measures | Run | Report |
+|---|---|---|---|
+| Core matcher | Pure orderbook matching and risk state updates | `bench-harness/run-core.sh --scenario mixed --commands 100000 --warmup 5000` | `core-<scenario>.json` |
+| Runtime | JSON input parse, validation, risk/runtime processing, replies, and events | `bench-harness/run-runtime.sh --scenario mixed --commands 100000 --warmup 5000` | `runtime-<scenario>.json` |
+| Runtime + output JSON | Runtime cost plus output JSON serialization | `bench-harness/run-runtime.sh --scenario mixed --commands 100000 --warmup 5000 --include-output-serialization` | `runtime-serialized-<scenario>.json` |
+| Broker loop | Runtime, outbox serialization, producer boundary, checkpoint delay, and offset commit boundary | `bench-harness/run-broker-loop.sh --scenario mixed --commands 100000 --warmup 5000` | `broker-loop-<scenario>.json` |
+
+Each report includes `throughput_per_sec`, output counts/bytes, and latency
+percentiles: `p50`, `p90`, `p95`, `p99`, `p99.9`, and max.
+
+Run the full local benchmark matrix:
+
+```sh
+bench-harness/run-all.sh
+```
+
 ## Architecture
 
 ```mermaid
@@ -127,30 +169,6 @@ Expected result:
 e2e smoke passed
 e2e smoke complete
 ```
-
-## Benchmarks
-
-The engine benchmark harness separates matching cost from runtime parsing and
-broker-loop overhead.
-
-```mermaid
-flowchart LR
-    scripts[bench-harness] --> core[core benchmark]
-    scripts --> runtime[runtime benchmark]
-    scripts --> broker[broker-loop benchmark]
-    core --> metrics[throughput + p50/p99]
-    runtime --> metrics
-    broker --> metrics
-```
-
-Run the full local matrix:
-
-```sh
-bench-harness/run-all.sh
-```
-
-See [bench-harness/README.md](bench-harness/README.md) for scenarios, output
-schema, and tunable environment variables.
 
 ## Tech Stack
 
