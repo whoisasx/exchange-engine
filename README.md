@@ -190,6 +190,7 @@ e2e smoke complete
 
 ## Documentation
 
+- [Editable architecture diagram](docs/engine-architecture.excalidraw)
 - [Local development](docs/local-development.md)
 - [Configuration](docs/configuration.md)
 - [Test harness](test-harness/README.md)
